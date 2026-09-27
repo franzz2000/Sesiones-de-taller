@@ -373,14 +373,20 @@ class AlarmApp(tk.Tk):
             variable.trace_add("write", self.on_form_changed)
 
     def on_form_changed(self, *_args):
-        if self.updating_form or self.form_mode != "idle":
+        if self.updating_form:
             return
-        self.form_mode = "new"
-        self.new_button.state(["disabled"])
-        self.save_button.state(["!disabled"])
-        self.delete_button.state(["disabled"])
-        self.cancel_button.state(["!disabled"])
-        self.status_var.set("Nueva alarma")
+        if self.form_mode == "idle":
+            self.form_mode = "new"
+            self.new_button.state(["disabled"])
+            self.save_button.state(["!disabled"])
+            self.delete_button.state(["disabled"])
+            self.cancel_button.state(["!disabled"])
+            self.status_var.set("Nueva alarma")
+        elif self.form_mode == "edit":
+            self.form_mode = "edit_dirty"
+            self.save_button.state(["!disabled"])
+            self.cancel_button.state(["!disabled"])
+            self.status_var.set("Alarma modificada")
 
     def build_ui(self):
         root = ttk.Frame(self, padding=12)
@@ -414,12 +420,8 @@ class AlarmApp(tk.Tk):
         buttons.pack(fill="x", pady=(8, 0))
         self.new_button = ttk.Button(buttons, text="Nueva", command=self.start_new_alarm)
         self.new_button.pack(side="left")
-        self.save_button = ttk.Button(buttons, text="Guardar", command=self.save_alarm, state="disabled")
-        self.save_button.pack(side="left", padx=4)
         self.delete_button = ttk.Button(buttons, text="Eliminar", command=self.delete_alarm, state="disabled")
         self.delete_button.pack(side="left", padx=4)
-        self.cancel_button = ttk.Button(buttons, text="Cancelar", command=self.cancel_configuration, state="disabled")
-        self.cancel_button.pack(side="left", padx=4)
         ttk.Button(buttons, text="↑ Subir", command=lambda: self.move_alarm(-1)).pack(side="left", padx=(12, 4))
         ttk.Button(buttons, text="↓ Bajar", command=lambda: self.move_alarm(1)).pack(side="left")
         ttk.Button(buttons, text="Detener sonido", command=self.stop_sound).pack(side="right")
@@ -474,7 +476,17 @@ class AlarmApp(tk.Tk):
             showvalue=True,
             length=180,
         ).grid(row=7, column=1, sticky="ew", pady=(8, 0))
-        ttk.Label(form, textvariable=self.status_var, foreground="#075").grid(row=8, column=0, columnspan=2, sticky="w", pady=(20, 0))
+        form_buttons = ttk.Frame(form)
+        form_buttons.grid(row=8, column=0, columnspan=2, sticky="ew", pady=(16, 0))
+        self.save_button = ttk.Button(form_buttons, text="Guardar", command=self.save_alarm, state="disabled")
+        self.save_button.pack(side="left")
+        self.cancel_button = ttk.Button(
+            form_buttons, text="Cancelar", command=self.cancel_configuration, state="disabled"
+        )
+        self.cancel_button.pack(side="left", padx=(6, 0))
+        ttk.Label(form, textvariable=self.status_var, foreground="#075").grid(
+            row=9, column=0, columnspan=2, sticky="w", pady=(12, 0)
+        )
 
     def normalize_time_field(self, variable: tk.StringVar, *, ceil: bool, field_name: str, field_widget):
         value = variable.get().strip()
@@ -655,9 +667,9 @@ class AlarmApp(tk.Tk):
                 self.day_vars[day].set(day in alarm.days)
         finally:
             self.updating_form = False
-        self.save_button.state(["!disabled"])
+        self.save_button.state(["disabled"])
         self.delete_button.state(["!disabled"])
-        self.cancel_button.state(["!disabled"])
+        self.cancel_button.state(["disabled"])
         self.new_button.state(["!disabled"])
 
     def start_new_alarm(self):
@@ -669,6 +681,10 @@ class AlarmApp(tk.Tk):
         self.after_idle(self.name_entry.focus_set)
 
     def cancel_configuration(self):
+        if self.form_mode == "edit_dirty" and self.selected_index is not None:
+            self.load_selected_alarm()
+            self.status_var.set("Cambios cancelados")
+            return
         self.clear_form()
         self.status_var.set("Configuración cancelada")
 
