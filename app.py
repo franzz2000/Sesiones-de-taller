@@ -2,7 +2,7 @@ import json
 import shutil
 import sys
 from dataclasses import asdict, dataclass
-from datetime import datetime, time as dtime
+from datetime import datetime, timedelta, time as dtime
 from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -208,8 +208,11 @@ class AlarmApp(tk.Tk):
         self.sound_var = tk.StringVar()
         self.volume_var = tk.IntVar(value=100)
         self.status_var = tk.StringVar(value="Listo")
+        self.sound_tooltip: tk.Toplevel | None = None
+        self.sound_tooltip_row: str | None = None
 
         self.build_ui()
+        self.bind("<Control-t>", self.create_test_alarm)
         self.build_menu()
         self.refresh_sounds()
         self.refresh_alarms()
@@ -297,6 +300,9 @@ class AlarmApp(tk.Tk):
             self.tree.column(col, width=width, anchor="w")
         self.tree.pack(fill="both", expand=True)
         self.tree.bind("<<TreeviewSelect>>", self.load_selected_alarm)
+        self.tree.bind("<Motion>", self.show_sound_tooltip)
+        self.tree.bind("<Leave>", lambda _event: self.hide_sound_tooltip())
+        self.tree.tag_configure("missing_sound", foreground="red")
 
         buttons = ttk.Frame(left)
         buttons.pack(fill="x", pady=(8, 0))
@@ -329,11 +335,21 @@ class AlarmApp(tk.Tk):
         ttk.Label(form, text="Inicio HH:MM:SS").grid(row=3, column=0, sticky="w", pady=(8, 0))
         self.start_entry = ttk.Entry(form, textvariable=self.start_var, width=10)
         self.start_entry.grid(row=3, column=1, sticky="w", pady=(8, 0))
-        self.start_entry.bind("<FocusOut>", lambda _event: self.normalize_time_field(self.start_var, ceil=False))
+        self.start_entry.bind(
+            "<FocusOut>",
+            lambda _event: self.normalize_time_field(
+                self.start_var, ceil=False, field_name="inicio", field_widget=self.start_entry
+            ),
+        )
         ttk.Label(form, text="Fin HH:MM:SS").grid(row=4, column=0, sticky="w", pady=(8, 0))
         self.end_entry = ttk.Entry(form, textvariable=self.end_var, width=10)
         self.end_entry.grid(row=4, column=1, sticky="w", pady=(8, 0))
-        self.end_entry.bind("<FocusOut>", lambda _event: self.normalize_time_field(self.end_var, ceil=True))
+        self.end_entry.bind(
+            "<FocusOut>",
+            lambda _event: self.normalize_time_field(
+                self.end_var, ceil=True, field_name="fin", field_widget=self.end_entry
+            ),
+        )
         ttk.Label(form, text="Admite 0700. Inicio completa con 00; fin con 59.", foreground="#555").grid(
             row=5, column=0, columnspan=2, sticky="w", pady=(2, 8)
         )
@@ -355,15 +371,19 @@ class AlarmApp(tk.Tk):
         ).grid(row=8, column=1, sticky="ew")
         ttk.Label(form, textvariable=self.status_var, foreground="#075").grid(row=9, column=0, columnspan=2, sticky="w", pady=(20, 0))
 
-    def normalize_time_field(self, variable: tk.StringVar, *, ceil: bool):
+    def normalize_time_field(self, variable: tk.StringVar, *, ceil: bool, field_name: str, field_widget):
         value = variable.get().strip()
         if not value:
             return
         try:
             variable.set(normalize_time(value, ceil=ceil))
-        except ValueError:
-            # Keep invalid input available for correction; Save will show the error.
-            pass
+        except ValueError as exc:
+            messagebox.showerror(
+                "Formato de hora no reconocido",
+                f"No se reconoce el formato de la hora de {field_name}.\n\n{exc}",
+            )
+            field_widget.focus_set()
+            field_widget.selection_range(0, tk.END)
 
     def refresh_sounds(self):
         self.sound_paths = self.store.sounds()
@@ -375,6 +395,7 @@ class AlarmApp(tk.Tk):
     def refresh_alarms(self):
         self.tree.delete(*self.tree.get_children())
         for idx, alarm in enumerate(self.store.alarms):
+            sound_path = Path(alarm.sound)
             self.tree.insert(
                 "",
                 "end",
@@ -386,9 +407,48 @@ class AlarmApp(tk.Tk):
                     alarm.start,
                     alarm.end,
                     f"{alarm.volume}%",
-                    sound_title(Path(alarm.sound)),
+                    sound_title(sound_path),
                 ),
+                tags=("missing_sound",) if not sound_path.exists() else (),
             )
+
+    def show_sound_tooltip(self, event):
+        row_id = self.tree.identify_row(event.y)
+        column_id = self.tree.identify_column(event.x)
+        if not row_id or column_id != "#7":
+            self.hide_sound_tooltip()
+            return
+        if self.sound_tooltip is not None and self.sound_tooltip_row == row_id:
+            return
+
+        alarm = self.store.alarms[int(row_id)]
+        self.hide_sound_tooltip()
+        tooltip = tk.Toplevel(self)
+        tooltip.withdraw()
+        tooltip.wm_overrideredirect(True)
+        tooltip.attributes("-topmost", True)
+        label = tk.Label(
+            tooltip,
+            text=Path(alarm.sound).name,
+            background="#fff8c6",
+            foreground="#000000",
+            relief="solid",
+            borderwidth=1,
+            padx=5,
+            pady=3,
+        )
+        label.pack()
+        tooltip.update_idletasks()
+        tooltip.geometry(f"+{event.x_root + 12}+{event.y_root + 12}")
+        tooltip.deiconify()
+        self.sound_tooltip = tooltip
+        self.sound_tooltip_row = row_id
+
+    def hide_sound_tooltip(self):
+        if self.sound_tooltip is not None:
+            self.sound_tooltip.destroy()
+            self.sound_tooltip = None
+            self.sound_tooltip_row = None
 
     def selected_sound_path(self) -> str:
         selected = self.sound_var.get()
@@ -499,6 +559,41 @@ class AlarmApp(tk.Tk):
         self.refresh_sounds()
         self.sound_var.set(sound_label(added))
         self.status_var.set(f"Movido a sonidos/{added.name}")
+
+    def create_test_alarm(self, _event=None):
+        now = datetime.now().replace(microsecond=0)
+        start_at = now + timedelta(seconds=20)
+        end_at = start_at + timedelta(seconds=30)
+        sound_path = next(
+            (
+                path
+                for path in self.store.sounds()
+                if sound_title(path).casefold() == "smoothing alarm ringtone"
+                or path.stem.casefold().replace("-", " ") == "soothing alarm ringtone"
+            ),
+            None,
+        )
+        if sound_path is None:
+            messagebox.showerror(
+                "Sonido no encontrado",
+                "No se encuentra el sonido «Smoothing Alarm Ringtone» en la carpeta sonidos.",
+            )
+            return "break"
+
+        alarm = Alarm(
+            name="Alarma de prueba",
+            days=[DAYS[start_at.weekday()]],
+            start=start_at.strftime("%H:%M:%S"),
+            end=end_at.strftime("%H:%M:%S"),
+            sound=str(sound_path),
+            volume=100,
+            enabled=True,
+        )
+        self.store.alarms.append(alarm)
+        self.store.save()
+        self.refresh_alarms()
+        self.status_var.set(f"Alarma de prueba programada para las {alarm.start}")
+        return "break"
 
     def move_alarm(self, direction: int):
         if self.selected_index is None:
