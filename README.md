@@ -76,6 +76,43 @@ dist/windows/Programador-de-alarmas.exe
 
 `build_windows.ps1` contiene el proceso real de construcción y también puede ejecutarse directamente en un equipo Windows.
 
+## Instalar y crear el ejecutable en Ubuntu/Linux
+
+Para ejecutar la aplicación desde el código fuente, instala Python, Tkinter y el soporte para entornos virtuales:
+
+```bash
+sudo apt update
+sudo apt install python3 python3-venv python3-tk
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+python app.py
+```
+
+Para crear el ejecutable Linux y un paquete distribuible:
+
+```bash
+chmod +x build_linux.sh
+./build_linux.sh
+```
+
+El script debe ejecutarse en Linux, ya que PyInstaller no genera un binario Linux nativo desde macOS. Los archivos generados son:
+
+```text
+dist/Programador-de-alarmas
+dist/Programador-de-alarmas-linux.tar.gz
+```
+
+Para instalar el paquete en otro equipo Ubuntu/Linux:
+
+```bash
+mkdir Programador-de-alarmas
+tar -xzf Programador-de-alarmas-linux.tar.gz -C Programador-de-alarmas
+cd Programador-de-alarmas
+chmod +x Programador-de-alarmas
+./Programador-de-alarmas
+```
+
 ## Licencia
 
 Copyright © 2026 Franz Jimeno.
