@@ -48,7 +48,7 @@ python3.13 -c "import platform; print(platform.machine())"
 rm -rf .venv
 python3.13 -m venv .venv
 source .venv/bin/activate
-python -m pip install -r requirements.txt -r requirements-build.txt
+python -m pip install -r requirements.txt -r requirements-build.txt -r requirements-macos.txt
 ```
 
 El resultado debe ser `arm64` en un Mac Apple Silicon. Si aparece `x86_64`, instala Python 3.13 desde Homebrew nativo para Apple Silicon y vuelve a crear el entorno. No uses el Python de `/usr/local`, que normalmente corresponde a Homebrew Intel; el de Apple Silicon suele estar en `/opt/homebrew`.

@@ -17,6 +17,11 @@ try:
 except ImportError:  # handled by falling back to the file name
     EasyID3 = None
 
+try:
+    from AppKit import NSApplication, NSImage
+except ImportError:  # optional outside macOS
+    NSApplication = NSImage = None
+
 APP_DIR = Path.home() / ".multi_alarm_clock"
 SOURCE_DIR = Path(__file__).resolve().parent
 if getattr(sys, "frozen", False):
@@ -258,6 +263,10 @@ class AlarmApp(tk.Tk):
         if ICON_FILE.exists():
             self.app_icon = tk.PhotoImage(file=ICON_FILE)
             self.iconphoto(True, self.app_icon)
+            if NSApplication and NSImage:
+                dock_icon = NSImage.alloc().initWithContentsOfFile_(str(ICON_FILE))
+                if dock_icon:
+                    NSApplication.sharedApplication().setApplicationIconImage_(dock_icon)
         self.store = AlarmStore()
         self.player = AudioPlayer() if pygame else None
         self.selected_index: int | None = None

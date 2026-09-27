@@ -51,7 +51,7 @@ for command in sips iconutil hdiutil; do
 done
 
 echo "Instalando dependencias de ejecución y construcción..."
-"$PYTHON_BIN" -m pip install -r "$ROOT_DIR/requirements.txt" -r "$ROOT_DIR/requirements-build.txt"
+"$PYTHON_BIN" -m pip install -r "$ROOT_DIR/requirements.txt" -r "$ROOT_DIR/requirements-build.txt" -r "$ROOT_DIR/requirements-macos.txt"
 
 echo "Creando el icono de macOS..."
 rm -rf "$ICONSET_DIR"
