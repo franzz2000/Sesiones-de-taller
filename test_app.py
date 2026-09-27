@@ -2,7 +2,15 @@ from pathlib import Path
 import unittest
 from unittest.mock import patch
 
-from app import Alarm, alarm_issues, alarm_names_using_sound, normalize_time, overlapping_alarm_indices, sound_title
+from app import (
+    Alarm,
+    alarm_issues,
+    alarm_names_using_sound,
+    format_duration,
+    normalize_time,
+    overlapping_alarm_indices,
+    sound_title,
+)
 
 
 class NormalizeTimeTests(unittest.TestCase):
@@ -47,6 +55,11 @@ class SoundTitleTests(unittest.TestCase):
             Alarm("Tarde", ["Mon"], "18:00:00", "18:05:00", "/sounds/other.mp3"),
         ]
         self.assertEqual(alarm_names_using_sound(alarms, Path("/new/path/alarm.mp3")), ["Mañana"])
+
+    def test_duration_is_formatted_for_minutes_and_hours(self):
+        self.assertEqual(format_duration(65.4), "01:05")
+        self.assertEqual(format_duration(3661), "1:01:01")
+        self.assertEqual(format_duration(None), "--:--")
 
 
 class AlarmOverlapTests(unittest.TestCase):

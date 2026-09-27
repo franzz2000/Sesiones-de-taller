@@ -14,8 +14,10 @@ except ImportError:  # handled in UI startup
 
 try:
     from mutagen.easyid3 import EasyID3
+    from mutagen.mp3 import MP3
 except ImportError:  # handled by falling back to the file name
     EasyID3 = None
+    MP3 = None
 
 try:
     from AppKit import NSApplication, NSImage
@@ -82,6 +84,26 @@ def sound_title(path: Path) -> str:
 
 def sound_label(path: Path) -> str:
     return f"{sound_title(path)} ({path.name})"
+
+
+def format_duration(seconds: float | None) -> str:
+    if seconds is None:
+        return "--:--"
+    total_seconds = max(0, round(seconds))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes:02d}:{seconds:02d}"
+
+
+def sound_duration(path: Path) -> float | None:
+    if MP3 is None:
+        return None
+    try:
+        return MP3(path).info.length
+    except Exception:
+        return None
 
 
 def alarm_names_using_sound(alarms: list["Alarm"], sound_path: Path) -> list[str]:
@@ -227,8 +249,12 @@ class AudioPlayer:
     def __init__(self):
         self.current_alarms: dict[int, Alarm] = {}
         self.channels: dict[int, object] = {}
+        self.preview_channel = None
+        self.preview_sound = None
         if pygame:
             pygame.mixer.init()
+            pygame.mixer.set_num_channels(max(8, pygame.mixer.get_num_channels()))
+            pygame.mixer.set_reserved(1)
 
     def play_loops(self, alarms: list[Alarm]):
         if not pygame:
@@ -252,9 +278,29 @@ class AudioPlayer:
     def is_playing(self) -> bool:
         return bool(self.current_alarms)
 
+    @property
+    def is_previewing(self) -> bool:
+        return self.preview_channel is not None and self.preview_channel.get_busy()
+
+    def preview(self, sound_path: Path):
+        if not pygame:
+            return
+        self.stop_preview()
+        self.preview_sound = pygame.mixer.Sound(str(sound_path))
+        self.preview_channel = pygame.mixer.Channel(0)
+        self.preview_channel.set_volume(1.0)
+        self.preview_channel.play(self.preview_sound)
+
+    def stop_preview(self):
+        if self.preview_channel is not None:
+            self.preview_channel.stop()
+        self.preview_channel = None
+        self.preview_sound = None
+
     def stop(self):
         if not pygame:
             return
+        self.stop_preview()
         for channel in self.channels.values():
             channel.stop()
         self.channels.clear()
@@ -725,22 +771,100 @@ class AlarmApp(tk.Tk):
         content = ttk.Frame(window, padding=12)
         content.pack(fill="both", expand=True)
         ttk.Label(content, text="Sonidos disponibles").pack(anchor="w")
-        sound_list = tk.Listbox(content, width=62, height=14, exportselection=False)
-        sound_list.pack(fill="both", expand=True, pady=(6, 10))
+        table_frame = ttk.Frame(content)
+        table_frame.pack(fill="both", expand=True, pady=(6, 10))
+        sound_table = ttk.Treeview(
+            table_frame,
+            columns=("name", "file", "duration"),
+            show="headings",
+            height=14,
+            selectmode="browse",
+        )
+        sound_table.heading("name", text="Nombre")
+        sound_table.heading("file", text="Fichero")
+        sound_table.heading("duration", text="Duración")
+        sound_table.column("name", width=220, anchor="w")
+        sound_table.column("file", width=270, anchor="w")
+        sound_table.column("duration", width=80, anchor="center", stretch=False)
+        scrollbar = ttk.Scrollbar(table_frame, orient="vertical", command=sound_table.yview)
+        sound_table.configure(yscrollcommand=scrollbar.set)
+        sound_table.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
         library_paths: list[Path] = []
+        table_tooltip: tk.Toplevel | None = None
+        tooltip_cell: tuple[str, str] | None = None
 
         def refresh_library(selected_path: Path | None = None):
             nonlocal library_paths
             library_paths = self.store.sounds()
-            sound_list.delete(0, tk.END)
-            for path in library_paths:
-                sound_list.insert(tk.END, sound_label(path))
+            sound_table.delete(*sound_table.get_children())
+            for index, path in enumerate(library_paths):
+                sound_table.insert(
+                    "",
+                    "end",
+                    iid=str(index),
+                    values=(sound_title(path), path.name, format_duration(sound_duration(path))),
+                )
             if selected_path:
                 for index, path in enumerate(library_paths):
                     if path == selected_path:
-                        sound_list.selection_set(index)
-                        sound_list.see(index)
+                        sound_table.selection_set(str(index))
+                        sound_table.focus(str(index))
+                        sound_table.see(str(index))
                         break
+            update_library_buttons()
+
+        def selected_library_sound() -> Path | None:
+            selection = sound_table.selection()
+            if not selection:
+                return None
+            return library_paths[int(selection[0])]
+
+        def update_library_buttons(_event=None):
+            if sound_table.selection() or (self.player and self.player.is_previewing):
+                preview_button.state(["!disabled"])
+            else:
+                preview_button.state(["disabled"])
+
+        def hide_table_tooltip(_event=None):
+            nonlocal table_tooltip, tooltip_cell
+            if table_tooltip is not None:
+                table_tooltip.destroy()
+                table_tooltip = None
+            tooltip_cell = None
+
+        def show_table_tooltip(event):
+            nonlocal table_tooltip, tooltip_cell
+            row_id = sound_table.identify_row(event.y)
+            column_id = sound_table.identify_column(event.x)
+            column_name = {"#1": "name", "#2": "file"}.get(column_id)
+            if not row_id or column_name is None:
+                hide_table_tooltip()
+                return
+            cell = (row_id, column_name)
+            if cell == tooltip_cell:
+                return
+            text = sound_table.set(row_id, column_name)
+            hide_table_tooltip()
+            tooltip = tk.Toplevel(window)
+            tooltip.withdraw()
+            tooltip.wm_overrideredirect(True)
+            tooltip.attributes("-topmost", True)
+            tk.Label(
+                tooltip,
+                text=text,
+                background="#fff8c6",
+                foreground="#000000",
+                relief="solid",
+                borderwidth=1,
+                padx=5,
+                pady=3,
+            ).pack()
+            tooltip.update_idletasks()
+            tooltip.geometry(f"+{event.x_root + 12}+{event.y_root + 12}")
+            tooltip.deiconify()
+            table_tooltip = tooltip
+            tooltip_cell = cell
 
         def add_library_sound():
             filename = filedialog.askopenfilename(parent=window, filetypes=[("Ficheros MP3", "*.mp3")])
@@ -753,11 +877,10 @@ class AlarmApp(tk.Tk):
             self.status_var.set(f"Movido a sonidos/{added.name}")
 
         def remove_library_sound():
-            selection = sound_list.curselection()
-            if not selection:
+            sound_path = selected_library_sound()
+            if sound_path is None:
                 messagebox.showwarning("Selecciona un sonido", "Selecciona el MP3 que quieres eliminar.", parent=window)
                 return
-            sound_path = library_paths[selection[0]]
             alarm_names = alarm_names_using_sound(self.store.alarms, sound_path)
             if alarm_names:
                 alarm_list = "\n".join(f"• {name}" for name in alarm_names)
@@ -770,6 +893,9 @@ class AlarmApp(tk.Tk):
             if not messagebox.askyesno("Eliminar sonido", warning, parent=window):
                 return
             try:
+                if self.player:
+                    self.player.stop_preview()
+                    preview_button.config(text="Reproducir")
                 sound_path.unlink()
             except OSError as exc:
                 messagebox.showerror("No se pudo eliminar", str(exc), parent=window)
@@ -779,14 +905,52 @@ class AlarmApp(tk.Tk):
             refresh_library()
             self.status_var.set(f"Sonido eliminado: {sound_path.name}")
 
+        def play_library_sound():
+            if self.player and self.player.is_previewing:
+                self.player.stop_preview()
+                preview_button.config(text="Reproducir")
+                return
+            sound_path = selected_library_sound()
+            if sound_path is None:
+                messagebox.showwarning("Selecciona un sonido", "Selecciona el MP3 que quieres reproducir.", parent=window)
+                return
+            if not self.player:
+                messagebox.showwarning("Audio no disponible", "No se puede reproducir el sonido.", parent=window)
+                return
+            try:
+                self.player.preview(sound_path)
+                preview_button.config(text="Parar")
+                monitor_preview()
+            except Exception as exc:
+                messagebox.showerror("No se pudo reproducir", str(exc), parent=window)
+
+        def monitor_preview():
+            if not window.winfo_exists():
+                return
+            if self.player and self.player.is_previewing:
+                window.after(200, monitor_preview)
+            else:
+                preview_button.config(text="Reproducir")
+
+        def close_library():
+            if self.player:
+                self.player.stop_preview()
+            hide_table_tooltip()
+            window.destroy()
+
         buttons = ttk.Frame(content)
         buttons.pack(fill="x")
         ttk.Button(buttons, text="Añadir MP3", command=add_library_sound).pack(side="left")
+        preview_button = ttk.Button(buttons, text="Reproducir", command=play_library_sound, state="disabled")
+        preview_button.pack(side="left", padx=(6, 0))
         ttk.Button(buttons, text="Eliminar", command=remove_library_sound).pack(side="left", padx=6)
-        ttk.Button(buttons, text="Cerrar", command=window.destroy).pack(side="right")
+        ttk.Button(buttons, text="Cerrar", command=close_library).pack(side="right")
 
+        sound_table.bind("<<TreeviewSelect>>", update_library_buttons)
+        sound_table.bind("<Motion>", show_table_tooltip)
+        sound_table.bind("<Leave>", hide_table_tooltip)
         refresh_library()
-        window.protocol("WM_DELETE_WINDOW", window.destroy)
+        window.protocol("WM_DELETE_WINDOW", close_library)
         window.grab_set()
         window.focus_set()
 
