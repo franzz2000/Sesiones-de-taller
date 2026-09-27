@@ -9,6 +9,10 @@ PACKAGE_DIR="$ROOT_DIR/build/linux"
 PACKAGE_FILE="$DIST_DIR/$EXECUTABLE_NAME-linux.tar.gz"
 PYTHON_BIN="${PYTHON_BIN:-$ROOT_DIR/.venv/bin/python}"
 
+if [[ "$PYTHON_BIN" != */* ]]; then
+    PYTHON_BIN="$(command -v "$PYTHON_BIN" || true)"
+fi
+
 if [[ "$(uname -s)" != "Linux" ]]; then
     echo "Error: este script debe ejecutarse en Linux." >&2
     exit 1

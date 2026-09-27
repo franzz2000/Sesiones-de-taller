@@ -18,6 +18,7 @@ Write-Host "Construyendo $AppName.exe..."
     --noconfirm `
     --onefile `
     --windowed `
+    --distpath "dist/windows" `
     --name $AppName `
     --icon "assets/app-icon.png" `
     --add-data "assets/app-icon.png;assets" `
@@ -28,4 +29,4 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 Write-Host ""
 Write-Host "Ejecutable creado en:"
-Write-Host "$PSScriptRoot\dist\$AppName.exe"
+Write-Host "$PSScriptRoot\dist\windows\$AppName.exe"

@@ -125,6 +125,27 @@ chmod +x Programador-de-alarmas
 ./Programador-de-alarmas
 ```
 
+## Publicar una versión en GitHub Releases
+
+El workflow `.github/workflows/release.yml` construye automáticamente las versiones para macOS ARM64, Linux x64 y Windows x64 cuando se publica una etiqueta que empieza por `v`.
+
+Antes de publicar, confirma que todos los cambios estén enviados a GitHub. Después crea y sube una etiqueta:
+
+```bash
+git tag -a v1.0.0 -m "Versión 1.0.0"
+git push origin v1.0.0
+```
+
+GitHub Actions ejecutará las tres compilaciones y creará una Release con estos archivos:
+
+```text
+Programador-de-alarmas.dmg
+Programador-de-alarmas-linux.tar.gz
+Programador-de-alarmas.exe
+```
+
+El progreso puede consultarse en la pestaña **Actions** del repositorio. Si alguna compilación falla, no se publica la Release.
+
 ## Licencia
 
 Copyright © 2026 Franz Jimeno.

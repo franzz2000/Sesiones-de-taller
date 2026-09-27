@@ -11,6 +11,10 @@ DMG_STAGE_DIR="$BUILD_DIR/dmg"
 DMG_FILE="$DIST_DIR/Programador-de-alarmas.dmg"
 PYTHON_BIN="${PYTHON_BIN:-$ROOT_DIR/.venv/bin/python}"
 
+if [[ "$PYTHON_BIN" != */* ]]; then
+    PYTHON_BIN="$(command -v "$PYTHON_BIN" || true)"
+fi
+
 if [[ "$(uname -s)" != "Darwin" ]]; then
     echo "Error: este script solo puede ejecutarse en macOS." >&2
     exit 1
