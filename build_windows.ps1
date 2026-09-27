@@ -22,6 +22,7 @@ Write-Host "Construyendo $AppName.exe..."
     --icon "assets/app-icon.png" `
     --add-data "assets/app-icon.png;assets" `
     --add-data "sonidos;sonidos" `
+    --add-data "LICENSE;." `
     app.py
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 

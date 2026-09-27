@@ -58,6 +58,7 @@ cd "$ROOT_DIR"
     --osx-bundle-identifier "com.franz.programador-alarmas" \
     --add-data "$ROOT_DIR/assets/app-icon.png:assets" \
     --add-data "$ROOT_DIR/sonidos:sonidos" \
+    --add-data "$ROOT_DIR/LICENSE:." \
     "$ROOT_DIR/app.py"
 
 echo "Creando la imagen DMG..."

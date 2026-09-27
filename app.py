@@ -180,6 +180,7 @@ class AlarmApp(tk.Tk):
         self.status_var = tk.StringVar(value="Listo")
 
         self.build_ui()
+        self.build_menu()
         self.refresh_sounds()
         self.refresh_alarms()
         self.fit_window_to_content()
@@ -191,6 +192,24 @@ class AlarmApp(tk.Tk):
                 "Falta dependencia",
                 "Instala pygame-ce para reproducir MP3:\n\npython -m pip install -r requirements.txt",
             )
+
+    def build_menu(self):
+        menu_bar = tk.Menu(self)
+        help_menu = tk.Menu(menu_bar, tearoff=False)
+        help_menu.add_command(label="Acerca de", command=self.show_about)
+        menu_bar.add_cascade(label="Ayuda", menu=help_menu)
+        self.config(menu=menu_bar)
+
+    def show_about(self):
+        messagebox.showinfo(
+            "Acerca de Programador de alarmas",
+            "Programador de alarmas\n\n"
+            "Autor: Franz Jimeno\n"
+            "Copyright © 2026 Franz Jimeno\n\n"
+            "Licencia Creative Commons Atribución 4.0 Internacional "
+            "(CC BY 4.0)\n"
+            "https://creativecommons.org/licenses/by/4.0/",
+        )
 
     def fit_window_to_content(self):
         self.update_idletasks()

@@ -74,3 +74,11 @@ dist/windows/Programador-de-alarmas.exe
 ```
 
 `build_windows.ps1` contiene el proceso real de construcción y también puede ejecutarse directamente en un equipo Windows.
+
+## Licencia
+
+Copyright © 2026 Franz Jimeno.
+
+Esta aplicación se distribuye bajo la licencia [Creative Commons Atribución 4.0 Internacional (CC BY 4.0)](https://creativecommons.org/licenses/by/4.0/). Puedes compartirla y adaptarla, incluso con fines comerciales, siempre que reconozcas adecuadamente la autoría, enlaces la licencia e indiques si has realizado cambios.
+
+Consulta los términos legales completos en [`LICENSE`](LICENSE).
