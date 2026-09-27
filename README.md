@@ -17,6 +17,7 @@ python app.py
 - El inicio y el fin se guardan como `HH:MM:SS`.
 - En el inicio, los componentes omitidos se completan con `00`: `7` se convierte en `07:00:00`.
 - En el fin, los componentes omitidos se completan con `59`: `7:20` se convierte en `07:20:59`.
+- También admiten escritura compacta sin dos puntos. En Inicio, `0700` se convierte en `07:00:00`; en Fin, se convierte en `07:00:59`. Los segundos explícitos, como en `072015`, se conservan: `07:20:15`.
 - Cada alarma tiene su propio volumen.
 - El orden de la lista determina la prioridad cuando varias alarmas coinciden.
 - **Detener sonido** silencia la ejecución actual hasta que termina su intervalo.

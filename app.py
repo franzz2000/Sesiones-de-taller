@@ -12,6 +12,11 @@ try:
 except ImportError:  # handled in UI startup
     pygame = None
 
+try:
+    from mutagen.easyid3 import EasyID3
+except ImportError:  # handled by falling back to the file name
+    EasyID3 = None
+
 APP_DIR = Path.home() / ".multi_alarm_clock"
 SOURCE_DIR = Path(__file__).resolve().parent
 if getattr(sys, "frozen", False):
@@ -37,10 +42,17 @@ DAY_LABELS = {
 
 
 def normalize_time(value: str, *, ceil: bool) -> str:
-    """Normalize H, H:M or H:M:S using floor/ceil values for omitted units."""
-    parts = [part.strip() for part in value.strip().split(":")]
+    """Normalize colon-separated or compact time input."""
+    raw = value.strip()
+    if raw.isdigit() and ":" not in raw and 3 <= len(raw) <= 6:
+        if len(raw) <= 4:
+            parts = [raw[:-2], raw[-2:]]
+        else:
+            parts = [raw[:-4], raw[-4:-2], raw[-2:]]
+    else:
+        parts = [part.strip() for part in raw.split(":")]
     if not 1 <= len(parts) <= 3 or any(not part.isdigit() for part in parts):
-        raise ValueError("Usa una hora válida con formato HH, HH:MM o HH:MM:SS.")
+        raise ValueError("Usa una hora válida: HH, HHMM, HHMMSS, HH:MM o HH:MM:SS.")
 
     numbers = [int(part) for part in parts]
     hour = numbers[0]
@@ -49,6 +61,22 @@ def normalize_time(value: str, *, ceil: bool) -> str:
     if not 0 <= hour <= 23 or not 0 <= minute <= 59 or not 0 <= second <= 59:
         raise ValueError("La hora debe estar comprendida entre 00:00:00 y 23:59:59.")
     return f"{hour:02d}:{minute:02d}:{second:02d}"
+
+
+def sound_title(path: Path) -> str:
+    """Return the MP3 title tag, falling back to a readable file stem."""
+    if EasyID3:
+        try:
+            titles = EasyID3(path).get("title", [])
+            if titles and titles[0].strip():
+                return titles[0].strip()
+        except Exception:
+            pass
+    return path.stem.replace("_", " ").replace("-", " ").strip().title()
+
+
+def sound_label(path: Path) -> str:
+    return f"{sound_title(path)} ({path.name})"
 
 
 @dataclass
@@ -168,6 +196,8 @@ class AlarmApp(tk.Tk):
         self.store = AlarmStore()
         self.player = AudioPlayer() if pygame else None
         self.selected_index: int | None = None
+        self.form_mode = "idle"
+        self.updating_form = False
         self.running = True
         self.silenced_occurrences: set[str] = set()
         self.day_vars = {day: tk.BooleanVar() for day in DAYS}
@@ -183,6 +213,7 @@ class AlarmApp(tk.Tk):
         self.build_menu()
         self.refresh_sounds()
         self.refresh_alarms()
+        self.setup_form_tracking()
         self.fit_window_to_content()
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self.after(200, self.scheduler_tick)
@@ -221,6 +252,29 @@ class AlarmApp(tk.Tk):
         self.geometry(f"{width}x{height}+{x}+{y}")
         self.minsize(width, height)
 
+    def setup_form_tracking(self):
+        variables = [
+            self.enabled_var,
+            self.name_var,
+            self.start_var,
+            self.end_var,
+            self.sound_var,
+            self.volume_var,
+            *self.day_vars.values(),
+        ]
+        for variable in variables:
+            variable.trace_add("write", self.on_form_changed)
+
+    def on_form_changed(self, *_args):
+        if self.updating_form or self.form_mode != "idle":
+            return
+        self.form_mode = "new"
+        self.new_button.state(["disabled"])
+        self.save_button.state(["!disabled"])
+        self.delete_button.state(["disabled"])
+        self.cancel_button.state(["!disabled"])
+        self.status_var.set("Nueva alarma")
+
     def build_ui(self):
         root = ttk.Frame(self, padding=12)
         root.pack(fill="both", expand=True)
@@ -246,7 +300,8 @@ class AlarmApp(tk.Tk):
 
         buttons = ttk.Frame(left)
         buttons.pack(fill="x", pady=(8, 0))
-        ttk.Button(buttons, text="Nueva", command=self.start_new_alarm).pack(side="left")
+        self.new_button = ttk.Button(buttons, text="Nueva", command=self.start_new_alarm)
+        self.new_button.pack(side="left")
         self.save_button = ttk.Button(buttons, text="Guardar", command=self.save_alarm, state="disabled")
         self.save_button.pack(side="left", padx=4)
         self.delete_button = ttk.Button(buttons, text="Eliminar", command=self.delete_alarm, state="disabled")
@@ -262,7 +317,8 @@ class AlarmApp(tk.Tk):
 
         ttk.Checkbutton(form, text="Activa", variable=self.enabled_var).grid(row=0, column=0, sticky="w", columnspan=2)
         ttk.Label(form, text="Nombre").grid(row=1, column=0, sticky="w", pady=(8, 0))
-        ttk.Entry(form, textvariable=self.name_var, width=28).grid(row=1, column=1, sticky="ew", pady=(8, 0))
+        self.name_entry = ttk.Entry(form, textvariable=self.name_var, width=28)
+        self.name_entry.grid(row=1, column=1, sticky="ew", pady=(8, 0))
 
         ttk.Label(form, text="Días").grid(row=2, column=0, sticky="nw", pady=(8, 0))
         days_box = ttk.Frame(form)
@@ -278,7 +334,7 @@ class AlarmApp(tk.Tk):
         self.end_entry = ttk.Entry(form, textvariable=self.end_var, width=10)
         self.end_entry.grid(row=4, column=1, sticky="w", pady=(8, 0))
         self.end_entry.bind("<FocusOut>", lambda _event: self.normalize_time_field(self.end_var, ceil=True))
-        ttk.Label(form, text="Inicio completa con 00; fin completa con 59.", foreground="#555").grid(
+        ttk.Label(form, text="Admite 0700. Inicio completa con 00; fin con 59.", foreground="#555").grid(
             row=5, column=0, columnspan=2, sticky="w", pady=(2, 8)
         )
 
@@ -311,9 +367,10 @@ class AlarmApp(tk.Tk):
 
     def refresh_sounds(self):
         self.sound_paths = self.store.sounds()
-        self.sound_combo["values"] = [path.name for path in self.sound_paths]
+        self.sound_labels = {sound_label(path): path for path in self.sound_paths}
+        self.sound_combo["values"] = list(self.sound_labels)
         if self.sound_paths and not self.sound_var.get():
-            self.sound_var.set(self.sound_paths[0].name)
+            self.sound_var.set(sound_label(self.sound_paths[0]))
 
     def refresh_alarms(self):
         self.tree.delete(*self.tree.get_children())
@@ -335,9 +392,9 @@ class AlarmApp(tk.Tk):
 
     def selected_sound_path(self) -> str:
         selected = self.sound_var.get()
-        for path in self.sound_paths:
-            if path.name == selected:
-                return str(path)
+        path = self.sound_labels.get(selected)
+        if path:
+            return str(path)
         raise ValueError("Selecciona un sonido MP3 del catálogo.")
 
     def save_alarm(self):
@@ -374,42 +431,57 @@ class AlarmApp(tk.Tk):
         selected = self.tree.selection()
         if not selected:
             return
-        self.selected_index = int(selected[0])
-        alarm = self.store.alarms[self.selected_index]
-        self.enabled_var.set(alarm.enabled)
-        self.name_var.set(alarm.name)
-        self.start_var.set(alarm.start)
-        self.end_var.set(alarm.end)
-        self.sound_var.set(Path(alarm.sound).name)
-        self.volume_var.set(alarm.volume)
-        for day in DAYS:
-            self.day_vars[day].set(day in alarm.days)
+        self.updating_form = True
+        self.form_mode = "edit"
+        try:
+            self.selected_index = int(selected[0])
+            alarm = self.store.alarms[self.selected_index]
+            self.enabled_var.set(alarm.enabled)
+            self.name_var.set(alarm.name)
+            self.start_var.set(alarm.start)
+            self.end_var.set(alarm.end)
+            self.sound_var.set(sound_label(Path(alarm.sound)))
+            self.volume_var.set(alarm.volume)
+            for day in DAYS:
+                self.day_vars[day].set(day in alarm.days)
+        finally:
+            self.updating_form = False
         self.save_button.state(["!disabled"])
         self.delete_button.state(["!disabled"])
         self.cancel_button.state(["!disabled"])
+        self.new_button.state(["!disabled"])
 
     def start_new_alarm(self):
         self.clear_form()
+        self.form_mode = "new"
+        self.new_button.state(["disabled"])
         self.save_button.state(["!disabled"])
         self.cancel_button.state(["!disabled"])
+        self.after_idle(self.name_entry.focus_set)
 
     def cancel_configuration(self):
         self.clear_form()
         self.status_var.set("Configuración cancelada")
 
     def clear_form(self):
-        self.selected_index = None
-        self.tree.selection_remove(self.tree.selection())
-        self.enabled_var.set(True)
-        self.name_var.set("")
-        self.start_var.set("08:00:00")
-        self.end_var.set("08:05:00")
-        self.volume_var.set(100)
-        for var in self.day_vars.values():
-            var.set(False)
+        self.updating_form = True
+        self.form_mode = "idle"
+        try:
+            self.selected_index = None
+            self.tree.selection_remove(self.tree.selection())
+            self.enabled_var.set(True)
+            self.name_var.set("")
+            self.start_var.set("08:00:00")
+            self.end_var.set("08:05:00")
+            self.volume_var.set(100)
+            for var in self.day_vars.values():
+                var.set(False)
+        finally:
+            self.updating_form = False
         self.save_button.state(["disabled"])
         self.delete_button.state(["disabled"])
         self.cancel_button.state(["disabled"])
+        self.new_button.state(["!disabled"])
 
     def delete_alarm(self):
         if self.selected_index is None:
@@ -425,7 +497,7 @@ class AlarmApp(tk.Tk):
             return
         added = self.store.add_sound(Path(filename))
         self.refresh_sounds()
-        self.sound_var.set(added.name)
+        self.sound_var.set(sound_label(added))
         self.status_var.set(f"Movido a sonidos/{added.name}")
 
     def move_alarm(self, direction: int):
