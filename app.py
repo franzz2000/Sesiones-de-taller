@@ -386,7 +386,7 @@ class AlarmApp(tk.Tk):
                     alarm.start,
                     alarm.end,
                     f"{alarm.volume}%",
-                    Path(alarm.sound).name,
+                    sound_title(Path(alarm.sound)),
                 ),
             )
 
