@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 APP_NAME="Programador de alarmas"
 BUILD_DIR="$ROOT_DIR/build"
-DIST_DIR="$ROOT_DIR/dist"
+DIST_DIR="$ROOT_DIR/dist/macos"
 ICONSET_DIR="$BUILD_DIR/AppIcon.iconset"
 ICNS_FILE="$BUILD_DIR/AppIcon.icns"
 DMG_STAGE_DIR="$BUILD_DIR/dmg"
@@ -74,6 +74,7 @@ cd "$ROOT_DIR"
     --clean \
     --noconfirm \
     --windowed \
+    --distpath "$DIST_DIR" \
     --name "$APP_NAME" \
     --icon "$ICNS_FILE" \
     --osx-bundle-identifier "com.franz.programador-alarmas" \

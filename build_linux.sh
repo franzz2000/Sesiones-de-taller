@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 APP_NAME="Programador de alarmas"
 EXECUTABLE_NAME="Programador-de-alarmas"
-DIST_DIR="$ROOT_DIR/dist"
+DIST_DIR="$ROOT_DIR/dist/linux"
 PACKAGE_DIR="$ROOT_DIR/build/linux"
 PACKAGE_FILE="$DIST_DIR/$EXECUTABLE_NAME-linux.tar.gz"
 PYTHON_BIN="${PYTHON_BIN:-$ROOT_DIR/.venv/bin/python}"
@@ -30,6 +30,7 @@ cd "$ROOT_DIR"
     --noconfirm \
     --onefile \
     --windowed \
+    --distpath "$DIST_DIR" \
     --name "$EXECUTABLE_NAME" \
     --icon "$ROOT_DIR/assets/app-icon.png" \
     --add-data "$ROOT_DIR/assets/app-icon.png:assets" \

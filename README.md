@@ -63,8 +63,8 @@ chmod +x build_macos.sh
 El script instala las dependencias de construcción, convierte el icono al formato de macOS y genera:
 
 ```text
-dist/Programador de alarmas.app
-dist/Programador-de-alarmas.dmg
+dist/macos/Programador de alarmas.app
+dist/macos/Programador-de-alarmas.dmg
 ```
 
 En la aplicación empaquetada, el catálogo de sonidos se copia al primer inicio en `~/.multi_alarm_clock/sonidos`, donde puede modificarse sin alterar la firma del paquete.
@@ -111,8 +111,8 @@ chmod +x build_linux.sh
 El script debe ejecutarse en Linux, ya que PyInstaller no genera un binario Linux nativo desde macOS. Los archivos generados son:
 
 ```text
-dist/Programador-de-alarmas
-dist/Programador-de-alarmas-linux.tar.gz
+dist/linux/Programador-de-alarmas
+dist/linux/Programador-de-alarmas-linux.tar.gz
 ```
 
 Para instalar el paquete en otro equipo Ubuntu/Linux:
