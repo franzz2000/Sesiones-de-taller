@@ -2,7 +2,7 @@ from pathlib import Path
 import unittest
 from unittest.mock import patch
 
-from app import normalize_time, sound_title
+from app import Alarm, alarm_issues, normalize_time, overlapping_alarm_indices, sound_title
 
 
 class NormalizeTimeTests(unittest.TestCase):
@@ -40,6 +40,33 @@ class SoundTitleTests(unittest.TestCase):
 
     def test_file_stem_is_used_when_metadata_is_unavailable(self):
         self.assertEqual(sound_title(Path("alarma-suave.mp3")), "Alarma Suave")
+
+
+class AlarmOverlapTests(unittest.TestCase):
+    def test_shared_day_overlaps_mark_both_alarms(self):
+        alarms = [
+            Alarm("A", ["Mon"], "08:00:00", "09:00:00", "a.mp3"),
+            Alarm("B", ["Mon", "Tue"], "08:30:00", "10:00:00", "b.mp3"),
+            Alarm("C", ["Tue"], "08:30:00", "10:00:00", "c.mp3"),
+        ]
+        self.assertEqual(overlapping_alarm_indices(alarms), {0, 1, 2})
+
+    def test_touching_intervals_do_not_overlap(self):
+        alarms = [
+            Alarm("A", ["Mon"], "08:00:00", "09:00:00", "a.mp3"),
+            Alarm("B", ["Mon"], "09:00:00", "10:00:00", "b.mp3"),
+        ]
+        self.assertEqual(overlapping_alarm_indices(alarms), set())
+
+    def test_issues_describe_overlap_and_missing_sound(self):
+        alarms = [
+            Alarm("Trabajo", ["Mon"], "08:00:00", "09:00:00", "missing-a.mp3"),
+            Alarm("Reunión", ["Mon"], "08:30:00", "10:00:00", "missing-b.mp3"),
+        ]
+        issues = alarm_issues(alarms)
+        self.assertIn("Se solapa con «Reunión».", issues[0])
+        self.assertIn("No se encuentra el fichero de sonido «missing-a.mp3».", issues[0])
+        self.assertIn("Se solapa con «Trabajo».", issues[1])
 
 
 if __name__ == "__main__":

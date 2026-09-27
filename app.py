@@ -99,12 +99,48 @@ class Alarm:
         return dtime.fromisoformat(self.start)
 
 
+def overlapping_alarm_indices(alarms: list[Alarm]) -> set[int]:
+    """Return enabled alarms whose intervals overlap on a shared weekday."""
+    overlapping: set[int] = set()
+    for index, alarm in enumerate(alarms):
+        if not alarm.enabled:
+            continue
+        for other_index in range(index + 1, len(alarms)):
+            other = alarms[other_index]
+            if not other.enabled or not set(alarm.days).intersection(other.days):
+                continue
+            if alarm.start_time < other.end_time and other.start_time < alarm.end_time:
+                overlapping.update((index, other_index))
+    return overlapping
+
+
+def alarm_issues(alarms: list[Alarm]) -> dict[int, list[str]]:
+    """Return human-readable issues for each alarm row."""
+    issues = {index: [] for index in range(len(alarms))}
+    for index, alarm in enumerate(alarms):
+        if not alarm.enabled:
+            continue
+        for other_index in range(index + 1, len(alarms)):
+            other = alarms[other_index]
+            if not other.enabled or not set(alarm.days).intersection(other.days):
+                continue
+            if alarm.start_time < other.end_time and other.start_time < alarm.end_time:
+                issues[index].append(f"Se solapa con «{other.name}».")
+                issues[other_index].append(f"Se solapa con «{alarm.name}».")
+    for index, alarm in enumerate(alarms):
+        sound_path = Path(alarm.sound)
+        if not sound_path.exists():
+            issues[index].append(f"No se encuentra el fichero de sonido «{sound_path.name}».")
+    return {index: messages for index, messages in issues.items() if messages}
+
+
 class AlarmStore:
     def __init__(self):
         APP_DIR.mkdir(exist_ok=True)
         SOUNDS_DIR.mkdir(exist_ok=True)
         self._migrate_legacy_sounds()
         self._install_bundled_sounds()
+        self._clean_empty_id3_comments()
         self.alarms: list[Alarm] = []
         self.load()
 
@@ -123,6 +159,21 @@ class AlarmStore:
             target = SOUNDS_DIR / source.name
             if not target.exists():
                 shutil.copy2(source, target)
+
+    def _clean_empty_id3_comments(self):
+        """Remove empty ID3 comments that make mpg123 print a warning."""
+        if EasyID3 is None:
+            return
+        for sound_path in SOUNDS_DIR.glob("*.mp3"):
+            try:
+                tags = EasyID3(sound_path)
+                comments = tags.get("comment", [])
+                if comments and not any(comment.strip() for comment in comments):
+                    del tags["comment"]
+                    tags.save()
+            except Exception:
+                # A malformed or unsupported tag must not prevent the app from starting.
+                continue
 
     def load(self):
         if not ALARMS_FILE.exists():
@@ -164,26 +215,40 @@ class AlarmStore:
 
 class AudioPlayer:
     def __init__(self):
-        self.current_alarm: Alarm | None = None
+        self.current_alarms: dict[int, Alarm] = {}
+        self.channels: dict[int, object] = {}
         if pygame:
             pygame.mixer.init()
 
-    def play_loop(self, alarm: Alarm):
+    def play_loops(self, alarms: list[Alarm]):
         if not pygame:
             return
-        if self.current_alarm is alarm:
-            return
-        pygame.mixer.music.stop()
-        pygame.mixer.music.load(alarm.sound)
-        pygame.mixer.music.set_volume(alarm.volume / 100)
-        pygame.mixer.music.play(loops=-1)
-        self.current_alarm = alarm
+        requested = {id(alarm): alarm for alarm in alarms}
+        for alarm_id in set(self.current_alarms) - set(requested):
+            self.channels[alarm_id].stop()
+            del self.channels[alarm_id]
+        for alarm_id, alarm in requested.items():
+            if alarm_id in self.current_alarms:
+                self.channels[alarm_id].set_volume(alarm.volume / 100)
+                continue
+            sound = pygame.mixer.Sound(alarm.sound)
+            channel = pygame.mixer.find_channel(True)
+            channel.set_volume(alarm.volume / 100)
+            channel.play(sound, loops=-1)
+            self.channels[alarm_id] = channel
+        self.current_alarms = requested
+
+    @property
+    def is_playing(self) -> bool:
+        return bool(self.current_alarms)
 
     def stop(self):
         if not pygame:
             return
-        pygame.mixer.music.stop()
-        self.current_alarm = None
+        for channel in self.channels.values():
+            channel.stop()
+        self.channels.clear()
+        self.current_alarms.clear()
 
 
 class AlarmApp(tk.Tk):
@@ -210,6 +275,8 @@ class AlarmApp(tk.Tk):
         self.status_var = tk.StringVar(value="Listo")
         self.sound_tooltip: tk.Toplevel | None = None
         self.sound_tooltip_row: str | None = None
+        self.problem_tooltip: tk.Toplevel | None = None
+        self.problem_tooltip_row: str | None = None
 
         self.build_ui()
         self.bind("<Control-t>", self.create_test_alarm)
@@ -285,7 +352,7 @@ class AlarmApp(tk.Tk):
         left = ttk.LabelFrame(root, text="Alarmas", padding=8)
         left.pack(side="left", fill="both", expand=True, padx=(0, 8))
 
-        columns = ("enabled", "name", "days", "start", "end", "volume", "sound")
+        columns = ("enabled", "name", "days", "start", "end", "volume", "sound", "alerts")
         self.tree = ttk.Treeview(left, columns=columns, show="headings", height=18)
         for col, title, width in [
             ("enabled", "Activa", 60),
@@ -295,6 +362,7 @@ class AlarmApp(tk.Tk):
             ("end", "Fin", 70),
             ("volume", "Vol.", 50),
             ("sound", "Sonido", 180),
+            ("alerts", "Avisos", 55),
         ]:
             self.tree.heading(col, text=title)
             self.tree.column(col, width=width, anchor="w")
@@ -303,6 +371,7 @@ class AlarmApp(tk.Tk):
         self.tree.bind("<Motion>", self.show_sound_tooltip)
         self.tree.bind("<Leave>", lambda _event: self.hide_sound_tooltip())
         self.tree.tag_configure("missing_sound", foreground="red")
+        self.tree.tag_configure("overlapping", foreground="#d97706")
 
         buttons = ttk.Frame(left)
         buttons.pack(fill="x", pady=(8, 0))
@@ -394,8 +463,11 @@ class AlarmApp(tk.Tk):
 
     def refresh_alarms(self):
         self.tree.delete(*self.tree.get_children())
+        overlapping = overlapping_alarm_indices(self.store.alarms)
+        issues = alarm_issues(self.store.alarms)
         for idx, alarm in enumerate(self.store.alarms):
             sound_path = Path(alarm.sound)
+            tag = "missing_sound" if not sound_path.exists() else "overlapping" if idx in overlapping else ""
             self.tree.insert(
                 "",
                 "end",
@@ -408,13 +480,19 @@ class AlarmApp(tk.Tk):
                     alarm.end,
                     f"{alarm.volume}%",
                     sound_title(sound_path),
+                    "⚠" if idx in issues else "",
                 ),
-                tags=("missing_sound",) if not sound_path.exists() else (),
+                tags=(tag,) if tag else (),
             )
 
     def show_sound_tooltip(self, event):
         row_id = self.tree.identify_row(event.y)
         column_id = self.tree.identify_column(event.x)
+        if column_id == "#8" and row_id:
+            self.hide_sound_tooltip()
+            self.show_problem_tooltip(event, row_id)
+            return
+        self.hide_problem_tooltip()
         if not row_id or column_id != "#7":
             self.hide_sound_tooltip()
             return
@@ -444,11 +522,46 @@ class AlarmApp(tk.Tk):
         self.sound_tooltip = tooltip
         self.sound_tooltip_row = row_id
 
+    def show_problem_tooltip(self, event, row_id: str):
+        if self.problem_tooltip is not None and self.problem_tooltip_row == row_id:
+            return
+        issues = alarm_issues(self.store.alarms).get(int(row_id), [])
+        if not issues:
+            return
+        self.hide_problem_tooltip()
+        tooltip = tk.Toplevel(self)
+        tooltip.withdraw()
+        tooltip.wm_overrideredirect(True)
+        tooltip.attributes("-topmost", True)
+        label = tk.Label(
+            tooltip,
+            text="\n".join(issues),
+            justify="left",
+            background="#fff8c6",
+            foreground="#000000",
+            relief="solid",
+            borderwidth=1,
+            padx=5,
+            pady=3,
+        )
+        label.pack()
+        tooltip.update_idletasks()
+        tooltip.geometry(f"+{event.x_root + 12}+{event.y_root + 12}")
+        tooltip.deiconify()
+        self.problem_tooltip = tooltip
+        self.problem_tooltip_row = row_id
+
     def hide_sound_tooltip(self):
         if self.sound_tooltip is not None:
             self.sound_tooltip.destroy()
             self.sound_tooltip = None
             self.sound_tooltip_row = None
+
+    def hide_problem_tooltip(self):
+        if self.problem_tooltip is not None:
+            self.problem_tooltip.destroy()
+            self.problem_tooltip = None
+            self.problem_tooltip_row = None
 
     def selected_sound_path(self) -> str:
         selected = self.sound_var.get()
@@ -615,8 +728,8 @@ class AlarmApp(tk.Tk):
     def stop_sound(self):
         if self.player:
             now = datetime.now()
-            if self.player.current_alarm:
-                self.silenced_occurrences.add(self.occurrence_key(self.player.current_alarm, now))
+            for alarm in self.player.current_alarms.values():
+                self.silenced_occurrences.add(self.occurrence_key(alarm, now))
             self.player.stop()
             self.status_var.set("Sonido detenido manualmente")
 
@@ -629,7 +742,7 @@ class AlarmApp(tk.Tk):
         now = datetime.now()
         day = DAYS[now.weekday()]
         current = now.time().replace(microsecond=0)
-        active_alarm = None
+        active_alarms: list[Alarm] = []
         active_keys: set[str] = set()
         for alarm in self.store.alarms:
             if not alarm.enabled or day not in alarm.days:
@@ -637,14 +750,15 @@ class AlarmApp(tk.Tk):
             key = self.occurrence_key(alarm, now)
             if alarm.start_time <= current < alarm.end_time:
                 active_keys.add(key)
-                if key not in self.silenced_occurrences and active_alarm is None:
-                    active_alarm = alarm
+                if key not in self.silenced_occurrences:
+                    active_alarms.append(alarm)
 
         self.silenced_occurrences.intersection_update(active_keys)
-        if active_alarm and self.player:
-            self.player.play_loop(active_alarm)
-            self.status_var.set(f"Sonando: {active_alarm.name}")
-        elif self.player and self.player.current_alarm:
+        if active_alarms and self.player:
+            self.player.play_loops(active_alarms)
+            names = ", ".join(alarm.name for alarm in active_alarms)
+            self.status_var.set(f"Sonando: {names}")
+        elif self.player and self.player.is_playing:
             self.player.stop()
             self.status_var.set("Listo")
         self.after(200, self.scheduler_tick)
