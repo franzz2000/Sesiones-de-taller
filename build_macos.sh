@@ -22,6 +22,27 @@ if [[ ! -x "$PYTHON_BIN" ]]; then
     exit 1
 fi
 
+PYTHON_VERSION="$("$PYTHON_BIN" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+case "$PYTHON_VERSION" in
+    3.12|3.13)
+        ;;
+    *)
+        echo "Error: para macOS se requiere Python 3.12 o 3.13; se ha encontrado Python $PYTHON_VERSION." >&2
+        echo "Crea el entorno con Python 3.13, por ejemplo:" >&2
+        echo "  python3.13 -m venv .venv" >&2
+        echo "o indica otro entorno con: PYTHON_BIN=/ruta/al/python ./build_macos.sh" >&2
+        exit 1
+        ;;
+esac
+
+HOST_ARCH="$(uname -m)"
+PYTHON_ARCH="$("$PYTHON_BIN" -c 'import platform; print(platform.machine())')"
+if [[ "$HOST_ARCH" != "$PYTHON_ARCH" ]]; then
+    echo "Error: el Python del entorno es $PYTHON_ARCH, pero este Mac usa $HOST_ARCH." >&2
+    echo "Crea el entorno con un Python nativo de la arquitectura del Mac." >&2
+    exit 1
+fi
+
 for command in sips iconutil hdiutil; do
     if ! command -v "$command" >/dev/null 2>&1; then
         echo "Error: falta la herramienta de macOS '$command'." >&2
