@@ -310,13 +310,33 @@ class AlarmApp(tk.Tk):
 
     def build_menu(self):
         menu_bar = tk.Menu(self)
+        if sys.platform == "darwin":
+            app_menu = tk.Menu(menu_bar, name="apple", tearoff=False)
+            app_menu.add_command(label="Acerca de Programador de alarmas", command=self.show_about)
+            menu_bar.add_cascade(menu=app_menu)
         settings_menu = tk.Menu(menu_bar, tearoff=False)
         settings_menu.add_command(label="Biblioteca de sonidos", command=self.open_sound_library)
         menu_bar.add_cascade(label="Configuración", menu=settings_menu)
         help_menu = tk.Menu(menu_bar, tearoff=False)
-        help_menu.add_command(label="Acerca de", command=self.show_about)
+        help_menu.add_command(label="Cómo usar la aplicación", command=self.show_help)
+        if sys.platform != "darwin":
+            help_menu.add_separator()
+            help_menu.add_command(label="Acerca de", command=self.show_about)
         menu_bar.add_cascade(label="Ayuda", menu=help_menu)
         self.config(menu=menu_bar)
+        if sys.platform == "darwin":
+            self.tk.createcommand("tkAboutDialog", self.show_about)
+
+    def show_help(self):
+        messagebox.showinfo(
+            "Ayuda de Programador de alarmas",
+            "1. Pulsa Nueva y escribe el nombre, los días y las horas de inicio y fin.\n\n"
+            "2. Selecciona un sonido y su volumen, y pulsa Guardar.\n\n"
+            "3. Gestiona los MP3 desde Configuración → Biblioteca de sonidos.\n\n"
+            "4. Las filas naranjas indican horarios solapados y las rojas, sonidos ausentes. "
+            "Sitúa el puntero sobre ⚠ para ver el problema.\n\n"
+            "5. Detener sonido silencia las alarmas que estén sonando. Ctrl-T crea una alarma de prueba.",
+        )
 
     def show_about(self):
         messagebox.showinfo(
