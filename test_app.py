@@ -2,7 +2,7 @@ from pathlib import Path
 import unittest
 from unittest.mock import patch
 
-from app import Alarm, alarm_issues, normalize_time, overlapping_alarm_indices, sound_title
+from app import Alarm, alarm_issues, alarm_names_using_sound, normalize_time, overlapping_alarm_indices, sound_title
 
 
 class NormalizeTimeTests(unittest.TestCase):
@@ -40,6 +40,13 @@ class SoundTitleTests(unittest.TestCase):
 
     def test_file_stem_is_used_when_metadata_is_unavailable(self):
         self.assertEqual(sound_title(Path("alarma-suave.mp3")), "Alarma Suave")
+
+    def test_alarm_names_using_sound_matches_by_file_name(self):
+        alarms = [
+            Alarm("Mañana", ["Mon"], "08:00:00", "08:05:00", "/old/path/alarm.mp3"),
+            Alarm("Tarde", ["Mon"], "18:00:00", "18:05:00", "/sounds/other.mp3"),
+        ]
+        self.assertEqual(alarm_names_using_sound(alarms, Path("/new/path/alarm.mp3")), ["Mañana"])
 
 
 class AlarmOverlapTests(unittest.TestCase):

@@ -22,7 +22,7 @@ python app.py
 - El orden de la lista determina la prioridad cuando varias alarmas coinciden.
 - **Detener sonido** silencia la ejecución actual hasta que termina su intervalo.
 - Los MP3 se detectan automáticamente en la carpeta `sonidos` situada junto a `app.py`.
-- **Añadir MP3 al catálogo** mueve el archivo seleccionado a esa carpeta.
+- **Configuración → Biblioteca de sonidos** abre una ventana para añadir o eliminar MP3. Antes de eliminar un sonido utilizado, se muestran las alarmas afectadas y se solicita confirmación.
 - La melodía se reproduce en bucle.
 
 ## Datos locales

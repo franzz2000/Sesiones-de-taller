@@ -84,6 +84,11 @@ def sound_label(path: Path) -> str:
     return f"{sound_title(path)} ({path.name})"
 
 
+def alarm_names_using_sound(alarms: list["Alarm"], sound_path: Path) -> list[str]:
+    """Return alarm names that reference a sound file."""
+    return [alarm.name for alarm in alarms if Path(alarm.sound).name == sound_path.name]
+
+
 @dataclass
 class Alarm:
     name: str
@@ -305,6 +310,9 @@ class AlarmApp(tk.Tk):
 
     def build_menu(self):
         menu_bar = tk.Menu(self)
+        settings_menu = tk.Menu(menu_bar, tearoff=False)
+        settings_menu.add_command(label="Biblioteca de sonidos", command=self.open_sound_library)
+        menu_bar.add_cascade(label="Configuración", menu=settings_menu)
         help_menu = tk.Menu(menu_bar, tearoff=False)
         help_menu.add_command(label="Acerca de", command=self.show_about)
         menu_bar.add_cascade(label="Ayuda", menu=help_menu)
@@ -435,8 +443,7 @@ class AlarmApp(tk.Tk):
         ttk.Label(form, text="Sonido MP3").grid(row=6, column=0, sticky="w")
         self.sound_combo = ttk.Combobox(form, textvariable=self.sound_var, state="readonly", width=25)
         self.sound_combo.grid(row=6, column=1, sticky="ew")
-        ttk.Button(form, text="Añadir MP3 al catálogo", command=self.add_sound).grid(row=7, column=0, columnspan=2, sticky="ew", pady=8)
-        ttk.Label(form, text="Volumen").grid(row=8, column=0, sticky="w")
+        ttk.Label(form, text="Volumen").grid(row=7, column=0, sticky="w", pady=(8, 0))
         tk.Scale(
             form,
             from_=0,
@@ -446,8 +453,8 @@ class AlarmApp(tk.Tk):
             orient="horizontal",
             showvalue=True,
             length=180,
-        ).grid(row=8, column=1, sticky="ew")
-        ttk.Label(form, textvariable=self.status_var, foreground="#075").grid(row=9, column=0, columnspan=2, sticky="w", pady=(20, 0))
+        ).grid(row=7, column=1, sticky="ew", pady=(8, 0))
+        ttk.Label(form, textvariable=self.status_var, foreground="#075").grid(row=8, column=0, columnspan=2, sticky="w", pady=(20, 0))
 
     def normalize_time_field(self, variable: tk.StringVar, *, ceil: bool, field_name: str, field_widget):
         value = variable.get().strip()
@@ -467,8 +474,8 @@ class AlarmApp(tk.Tk):
         self.sound_paths = self.store.sounds()
         self.sound_labels = {sound_label(path): path for path in self.sound_paths}
         self.sound_combo["values"] = list(self.sound_labels)
-        if self.sound_paths and not self.sound_var.get():
-            self.sound_var.set(sound_label(self.sound_paths[0]))
+        if self.sound_var.get() not in self.sound_labels:
+            self.sound_var.set(sound_label(self.sound_paths[0]) if self.sound_paths else "")
 
     def refresh_alarms(self):
         self.tree.delete(*self.tree.get_children())
@@ -673,14 +680,79 @@ class AlarmApp(tk.Tk):
         self.refresh_alarms()
         self.clear_form()
 
-    def add_sound(self):
-        filename = filedialog.askopenfilename(filetypes=[("MP3", "*.mp3")])
-        if not filename:
-            return
-        added = self.store.add_sound(Path(filename))
-        self.refresh_sounds()
-        self.sound_var.set(sound_label(added))
-        self.status_var.set(f"Movido a sonidos/{added.name}")
+    def open_sound_library(self):
+        window = tk.Toplevel(self)
+        window.title("Biblioteca de sonidos")
+        window.transient(self)
+        window.resizable(True, True)
+
+        content = ttk.Frame(window, padding=12)
+        content.pack(fill="both", expand=True)
+        ttk.Label(content, text="Sonidos disponibles").pack(anchor="w")
+        sound_list = tk.Listbox(content, width=62, height=14, exportselection=False)
+        sound_list.pack(fill="both", expand=True, pady=(6, 10))
+        library_paths: list[Path] = []
+
+        def refresh_library(selected_path: Path | None = None):
+            nonlocal library_paths
+            library_paths = self.store.sounds()
+            sound_list.delete(0, tk.END)
+            for path in library_paths:
+                sound_list.insert(tk.END, sound_label(path))
+            if selected_path:
+                for index, path in enumerate(library_paths):
+                    if path == selected_path:
+                        sound_list.selection_set(index)
+                        sound_list.see(index)
+                        break
+
+        def add_library_sound():
+            filename = filedialog.askopenfilename(parent=window, filetypes=[("Ficheros MP3", "*.mp3")])
+            if not filename:
+                return
+            added = self.store.add_sound(Path(filename))
+            self.refresh_sounds()
+            self.sound_var.set(sound_label(added))
+            refresh_library(added)
+            self.status_var.set(f"Movido a sonidos/{added.name}")
+
+        def remove_library_sound():
+            selection = sound_list.curselection()
+            if not selection:
+                messagebox.showwarning("Selecciona un sonido", "Selecciona el MP3 que quieres eliminar.", parent=window)
+                return
+            sound_path = library_paths[selection[0]]
+            alarm_names = alarm_names_using_sound(self.store.alarms, sound_path)
+            if alarm_names:
+                alarm_list = "\n".join(f"• {name}" for name in alarm_names)
+                warning = (
+                    f"El sonido «{sound_path.name}» se utiliza en estas alarmas:\n\n"
+                    f"{alarm_list}\n\nSi lo eliminas, esas alarmas quedarán sin sonido."
+                )
+            else:
+                warning = f"¿Quieres eliminar «{sound_path.name}» de la biblioteca?"
+            if not messagebox.askyesno("Eliminar sonido", warning, parent=window):
+                return
+            try:
+                sound_path.unlink()
+            except OSError as exc:
+                messagebox.showerror("No se pudo eliminar", str(exc), parent=window)
+                return
+            self.refresh_sounds()
+            self.refresh_alarms()
+            refresh_library()
+            self.status_var.set(f"Sonido eliminado: {sound_path.name}")
+
+        buttons = ttk.Frame(content)
+        buttons.pack(fill="x")
+        ttk.Button(buttons, text="Añadir MP3", command=add_library_sound).pack(side="left")
+        ttk.Button(buttons, text="Eliminar", command=remove_library_sound).pack(side="left", padx=6)
+        ttk.Button(buttons, text="Cerrar", command=window.destroy).pack(side="right")
+
+        refresh_library()
+        window.protocol("WM_DELETE_WINDOW", window.destroy)
+        window.grab_set()
+        window.focus_set()
 
     def create_test_alarm(self, _event=None):
         now = datetime.now().replace(microsecond=0)
