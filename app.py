@@ -28,9 +28,9 @@ except ImportError:  # handled by falling back to the file name
     MP3 = None
 
 try:
-    from AppKit import NSApplication, NSImage
+    from AppKit import NSApplication, NSApplicationActivationPolicyAccessory, NSImage
 except ImportError:  # optional outside macOS
-    NSApplication = NSImage = None
+    NSApplication = NSApplicationActivationPolicyAccessory = NSImage = None
 
 APP_DIR = Path.home() / ".multi_alarm_clock"
 SOURCE_DIR = Path(__file__).resolve().parent
@@ -402,6 +402,10 @@ class AlarmApp(tk.Tk):
                 dock_icon = NSImage.alloc().initWithContentsOfFile_(str(ICON_FILE))
                 if dock_icon:
                     NSApplication.sharedApplication().setApplicationIconImage_(dock_icon)
+        if sys.platform == "darwin" and NSApplication:
+            NSApplication.sharedApplication().setActivationPolicy_(
+                NSApplicationActivationPolicyAccessory
+            )
         self.store = AlarmStore()
         self.player = AudioPlayer() if pygame else None
         self.selected_index: int | None = None
@@ -469,13 +473,22 @@ class AlarmApp(tk.Tk):
             pystray.MenuItem("Salir", request_exit),
         )
         self.last_tray_text = tray_status_text(self.store.alarms, datetime.now())
+        icon_options = {}
+        if sys.platform == "darwin" and NSApplication:
+            icon_options["darwin_nsapplication"] = NSApplication.sharedApplication()
         self.tray_icon = pystray.Icon(
             "programador-de-alarmas",
             Image.open(ICON_FILE),
             self.last_tray_text,
             menu,
+            **icon_options,
         )
-        self.tray_icon.run_detached()
+        if sys.platform == "darwin":
+            # AppKit UI objects must be made visible from the main thread.
+            self.tray_icon.run_detached(setup=lambda _icon: None)
+            self.tray_icon.visible = True
+        else:
+            self.tray_icon.run_detached()
 
     def poll_tray_commands(self):
         if not self.running:

@@ -16,6 +16,10 @@ para que las alarmas sigan funcionando. Usa el icono de la aplicación para volv
 a mostrar la ventana o selecciona **Salir** en su menú para finalizarla. El texto
 del icono indica cuándo sonará la próxima alarma.
 
+En macOS, la aplicación funciona como una aplicación accesoria: no aparece en el
+Dock y se controla desde su icono de la barra de menús. En Windows y Linux, al
+ocultar la ventana permanece disponible desde la bandeja del sistema.
+
 ## Comportamiento importante
 
 - Cada alarma puede estar activa en uno o varios días de la semana.

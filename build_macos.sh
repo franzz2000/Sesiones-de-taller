@@ -87,6 +87,11 @@ cd "$ROOT_DIR"
     --add-data "$ROOT_DIR/LICENSE:." \
     "$ROOT_DIR/app.py"
 
+echo "Configurando la aplicación para que no aparezca en el Dock..."
+INFO_PLIST="$DIST_DIR/$APP_NAME.app/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Delete :LSUIElement" "$INFO_PLIST" >/dev/null 2>&1 || true
+/usr/libexec/PlistBuddy -c "Add :LSUIElement bool true" "$INFO_PLIST"
+
 echo "Creando la imagen DMG..."
 rm -rf "$DMG_STAGE_DIR" "$DMG_FILE"
 mkdir -p "$DMG_STAGE_DIR"
