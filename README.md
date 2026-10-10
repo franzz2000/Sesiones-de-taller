@@ -11,6 +11,11 @@ python -m pip install -r requirements.txt
 python app.py
 ```
 
+Al cerrar la ventana, la aplicación continúa ejecutándose en la barra de tareas
+para que las alarmas sigan funcionando. Usa el icono de la aplicación para volver
+a mostrar la ventana o selecciona **Salir** en su menú para finalizarla. El texto
+del icono indica cuándo sonará la próxima alarma.
+
 ## Comportamiento importante
 
 - Cada alarma puede estar activa en uno o varios días de la semana.

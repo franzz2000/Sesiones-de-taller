@@ -1,4 +1,5 @@
 import json
+import queue
 import shutil
 import socket
 import sys
@@ -12,6 +13,12 @@ try:
     import pygame
 except ImportError:  # handled in UI startup
     pygame = None
+
+try:
+    import pystray
+    from PIL import Image
+except ImportError:  # handled in UI startup
+    pystray = Image = None
 
 try:
     from mutagen.easyid3 import EasyID3
@@ -178,6 +185,33 @@ class Alarm:
     @property
     def start_time(self) -> dtime:
         return dtime.fromisoformat(self.start)
+
+
+def next_alarm_occurrence(alarms: list[Alarm], now: datetime) -> tuple[datetime, Alarm] | None:
+    """Return the next enabled alarm start in the coming seven days."""
+    candidates: list[tuple[datetime, Alarm]] = []
+    for days_ahead in range(8):
+        date = (now + timedelta(days=days_ahead)).date()
+        day = DAYS[date.weekday()]
+        for alarm in alarms:
+            if not alarm.enabled or day not in alarm.days:
+                continue
+            occurrence = datetime.combine(date, alarm.start_time)
+            if occurrence > now:
+                candidates.append((occurrence, alarm))
+    return min(candidates, key=lambda item: item[0]) if candidates else None
+
+
+def tray_status_text(alarms: list[Alarm], now: datetime) -> str:
+    next_alarm = next_alarm_occurrence(alarms, now)
+    if next_alarm is None:
+        return "Programador de alarmas — No hay alarmas programadas"
+    occurrence, alarm = next_alarm
+    day_label = DAY_LABELS[DAYS[occurrence.weekday()]].lower()
+    return (
+        f"Próxima alarma: {day_label} {occurrence:%d/%m} "
+        f"a las {occurrence:%H:%M:%S} — {alarm.name}"
+    )
 
 
 def overlapping_alarm_indices(alarms: list[Alarm]) -> set[int]:
@@ -374,6 +408,9 @@ class AlarmApp(tk.Tk):
         self.form_mode = "idle"
         self.updating_form = False
         self.running = True
+        self.tray_commands: queue.SimpleQueue[str] = queue.SimpleQueue()
+        self.tray_icon = None
+        self.last_tray_text = ""
         self.silenced_occurrences: set[str] = set()
         self.day_vars = {day: tk.BooleanVar() for day in DAYS}
         self.enabled_var = tk.BooleanVar(value=True)
@@ -396,6 +433,8 @@ class AlarmApp(tk.Tk):
         self.setup_form_tracking()
         self.fit_window_to_content()
         self.protocol("WM_DELETE_WINDOW", self.on_close)
+        self.start_tray_icon()
+        self.after(200, self.poll_tray_commands)
         self.after(200, self.scheduler_tick)
         if self.single_instance_guard:
             self.after(200, self.poll_single_instance)
@@ -405,6 +444,61 @@ class AlarmApp(tk.Tk):
                 "Falta dependencia",
                 "Instala pygame-ce para reproducir MP3:\n\npython -m pip install -r requirements.txt",
             )
+
+        if pystray is None or Image is None:
+            messagebox.showwarning(
+                "Falta dependencia",
+                "No se puede crear el icono de la barra de tareas.\n\n"
+                "Instala las dependencias con:\npython -m pip install -r requirements.txt",
+            )
+
+    def start_tray_icon(self):
+        if pystray is None or Image is None or not ICON_FILE.exists():
+            return
+
+        def request_show(_icon=None, _item=None):
+            self.tray_commands.put("show")
+
+        def request_exit(_icon=None, _item=None):
+            self.tray_commands.put("exit")
+
+        show_options = {"default": True} if pystray.Icon.HAS_DEFAULT_ACTION else {}
+        menu = pystray.Menu(
+            pystray.MenuItem("Mostrar ventana", request_show, **show_options),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem("Salir", request_exit),
+        )
+        self.last_tray_text = tray_status_text(self.store.alarms, datetime.now())
+        self.tray_icon = pystray.Icon(
+            "programador-de-alarmas",
+            Image.open(ICON_FILE),
+            self.last_tray_text,
+            menu,
+        )
+        self.tray_icon.run_detached()
+
+    def poll_tray_commands(self):
+        if not self.running:
+            return
+        while True:
+            try:
+                command = self.tray_commands.get_nowait()
+            except queue.Empty:
+                break
+            if command == "show":
+                self.restore_window()
+            elif command == "exit":
+                self.quit_application()
+                return
+        self.after(200, self.poll_tray_commands)
+
+    def update_tray_status(self, now: datetime):
+        if self.tray_icon is None:
+            return
+        text = tray_status_text(self.store.alarms, now)
+        if text != self.last_tray_text:
+            self.tray_icon.title = text
+            self.last_tray_text = text
 
     def build_menu(self):
         menu_bar = tk.Menu(self)
@@ -1090,6 +1184,7 @@ class AlarmApp(tk.Tk):
         if not self.running:
             return
         now = datetime.now()
+        self.update_tray_status(now)
         day = DAYS[now.weekday()]
         current = now.time().replace(microsecond=0)
         active_alarms: list[Alarm] = []
@@ -1114,8 +1209,18 @@ class AlarmApp(tk.Tk):
         self.after(200, self.scheduler_tick)
 
     def on_close(self):
+        if self.tray_icon is None:
+            self.quit_application()
+            return
+        self.withdraw()
+        self.status_var.set("La aplicación continúa ejecutándose en la barra de tareas")
+
+    def quit_application(self):
         self.running = False
         self.stop_sound()
+        if self.tray_icon is not None:
+            self.tray_icon.stop()
+            self.tray_icon = None
         if self.single_instance_guard:
             self.single_instance_guard.close()
         self.destroy()

@@ -1,4 +1,5 @@
 from pathlib import Path
+from datetime import datetime
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -8,9 +9,11 @@ from app import (
     alarm_issues,
     alarm_names_using_sound,
     format_duration,
+    next_alarm_occurrence,
     normalize_time,
     overlapping_alarm_indices,
     sound_title,
+    tray_status_text,
 )
 
 
@@ -88,6 +91,32 @@ class AlarmOverlapTests(unittest.TestCase):
         self.assertIn("Se solapa con «Reunión».", issues[0])
         self.assertIn("No se encuentra el fichero de sonido «missing-a.mp3».", issues[0])
         self.assertIn("Se solapa con «Trabajo».", issues[1])
+
+
+class NextAlarmTests(unittest.TestCase):
+    def test_returns_next_alarm_today(self):
+        alarms = [Alarm("Desayuno", ["Mon"], "08:30:00", "08:35:00", "alarm.mp3")]
+        result = next_alarm_occurrence(alarms, datetime(2026, 10, 12, 8, 0, 0))
+        self.assertIsNotNone(result)
+        occurrence, alarm = result
+        self.assertEqual(occurrence, datetime(2026, 10, 12, 8, 30, 0))
+        self.assertEqual(alarm.name, "Desayuno")
+
+    def test_skips_disabled_and_past_alarms(self):
+        alarms = [
+            Alarm("Pasada", ["Mon"], "07:00:00", "07:05:00", "a.mp3"),
+            Alarm("Desactivada", ["Mon"], "09:00:00", "09:05:00", "b.mp3", enabled=False),
+            Alarm("Mañana", ["Tue"], "06:00:00", "06:05:00", "c.mp3"),
+        ]
+        result = next_alarm_occurrence(alarms, datetime(2026, 10, 12, 8, 0, 0))
+        self.assertEqual(result[0], datetime(2026, 10, 13, 6, 0, 0))
+        self.assertEqual(result[1].name, "Mañana")
+
+    def test_tray_text_contains_time_and_description(self):
+        alarms = [Alarm("Reunión", ["Mon"], "09:15:00", "09:20:00", "a.mp3")]
+        text = tray_status_text(alarms, datetime(2026, 10, 12, 8, 0, 0))
+        self.assertIn("09:15:00", text)
+        self.assertIn("Reunión", text)
 
 
 class SingleInstanceTests(unittest.TestCase):
