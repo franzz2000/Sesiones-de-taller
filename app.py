@@ -28,9 +28,21 @@ except ImportError:  # handled by falling back to the file name
     MP3 = None
 
 try:
-    from AppKit import NSApplication, NSApplicationActivationPolicyAccessory, NSImage
+    import objc
+    from AppKit import (
+        NSApplication,
+        NSApplicationActivationPolicyAccessory,
+        NSImage,
+        NSMenu,
+        NSMenuItem,
+        NSStatusBar,
+        NSVariableStatusItemLength,
+    )
+    from Foundation import NSObject
 except ImportError:  # optional outside macOS
+    objc = None
     NSApplication = NSApplicationActivationPolicyAccessory = NSImage = None
+    NSMenu = NSMenuItem = NSStatusBar = NSVariableStatusItemLength = NSObject = None
 
 APP_DIR = Path.home() / ".multi_alarm_clock"
 SOURCE_DIR = Path(__file__).resolve().parent
@@ -55,6 +67,64 @@ DAY_LABELS = {
     "Sun": "Domingo",
 }
 SINGLE_INSTANCE_PORT = 43827
+
+
+if NSObject is not None:
+    class MacTrayIcon(NSObject):
+        """Native macOS menu-bar icon backed directly by NSStatusBar."""
+
+        @objc.python_method
+        def configure(self, icon_path: Path, title: str, commands: queue.SimpleQueue[str]):
+            self.commands = commands
+            self.status_item = NSStatusBar.systemStatusBar().statusItemWithLength_(
+                NSVariableStatusItemLength
+            )
+            image = NSImage.alloc().initWithContentsOfFile_(str(icon_path))
+            image.setSize_((18, 18))
+            image.setTemplate_(False)
+            button = self.status_item.button()
+            button.setImage_(image)
+            button.setToolTip_(title)
+
+            menu = NSMenu.alloc().init()
+            show_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                "Mostrar ventana", "showWindow:", ""
+            )
+            show_item.setTarget_(self)
+            menu.addItem_(show_item)
+            menu.addItem_(NSMenuItem.separatorItem())
+            exit_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                "Salir", "quitApplication:", ""
+            )
+            exit_item.setTarget_(self)
+            menu.addItem_(exit_item)
+            self.status_item.setMenu_(menu)
+            self.menu = menu
+            return self
+
+        def showWindow_(self, _sender):
+            self.commands.put("show")
+
+        def quitApplication_(self, _sender):
+            self.commands.put("exit")
+
+        @property
+        @objc.python_method
+        def title(self):
+            return self.status_item.button().toolTip()
+
+        @title.setter
+        @objc.python_method
+        def title(self, value):
+            self.status_item.button().setToolTip_(value)
+
+        @objc.python_method
+        def stop(self):
+            if getattr(self, "status_item", None) is not None:
+                NSStatusBar.systemStatusBar().removeStatusItem_(self.status_item)
+                self.status_item = None
+else:
+    MacTrayIcon = None
 
 
 class SingleInstanceGuard:
@@ -437,6 +507,7 @@ class AlarmApp(tk.Tk):
         self.setup_form_tracking()
         self.fit_window_to_content()
         self.protocol("WM_DELETE_WINDOW", self.on_close)
+        self.bind("<Unmap>", self.hide_all_tooltips, add="+")
         self.start_tray_icon()
         self.after(200, self.poll_tray_commands)
         self.after(200, self.scheduler_tick)
@@ -449,7 +520,7 @@ class AlarmApp(tk.Tk):
                 "Instala pygame-ce para reproducir MP3:\n\npython -m pip install -r requirements.txt",
             )
 
-        if pystray is None or Image is None:
+        if sys.platform != "darwin" and (pystray is None or Image is None):
             messagebox.showwarning(
                 "Falta dependencia",
                 "No se puede crear el icono de la barra de tareas.\n\n"
@@ -457,7 +528,16 @@ class AlarmApp(tk.Tk):
             )
 
     def start_tray_icon(self):
-        if pystray is None or Image is None or not ICON_FILE.exists():
+        if not ICON_FILE.exists():
+            return
+
+        self.last_tray_text = tray_status_text(self.store.alarms, datetime.now())
+        if sys.platform == "darwin" and MacTrayIcon is not None:
+            self.tray_icon = MacTrayIcon.alloc().init().configure(
+                ICON_FILE, self.last_tray_text, self.tray_commands
+            )
+            return
+        if pystray is None or Image is None:
             return
 
         def request_show(_icon=None, _item=None):
@@ -472,23 +552,13 @@ class AlarmApp(tk.Tk):
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Salir", request_exit),
         )
-        self.last_tray_text = tray_status_text(self.store.alarms, datetime.now())
-        icon_options = {}
-        if sys.platform == "darwin" and NSApplication:
-            icon_options["darwin_nsapplication"] = NSApplication.sharedApplication()
         self.tray_icon = pystray.Icon(
             "programador-de-alarmas",
             Image.open(ICON_FILE),
             self.last_tray_text,
             menu,
-            **icon_options,
         )
-        if sys.platform == "darwin":
-            # AppKit UI objects must be made visible from the main thread.
-            self.tray_icon.run_detached(setup=lambda _icon: None)
-            self.tray_icon.visible = True
-        else:
-            self.tray_icon.run_detached()
+        self.tray_icon.run_detached()
 
     def poll_tray_commands(self):
         if not self.running:
@@ -757,7 +827,7 @@ class AlarmApp(tk.Tk):
         tooltip = tk.Toplevel(self)
         tooltip.withdraw()
         tooltip.wm_overrideredirect(True)
-        tooltip.attributes("-topmost", True)
+        tooltip.transient(self)
         label = tk.Label(
             tooltip,
             text=Path(alarm.sound).name,
@@ -785,7 +855,7 @@ class AlarmApp(tk.Tk):
         tooltip = tk.Toplevel(self)
         tooltip.withdraw()
         tooltip.wm_overrideredirect(True)
-        tooltip.attributes("-topmost", True)
+        tooltip.transient(self)
         label = tk.Label(
             tooltip,
             text="\n".join(issues),
@@ -815,6 +885,10 @@ class AlarmApp(tk.Tk):
             self.problem_tooltip.destroy()
             self.problem_tooltip = None
             self.problem_tooltip_row = None
+
+    def hide_all_tooltips(self, _event=None):
+        self.hide_sound_tooltip()
+        self.hide_problem_tooltip()
 
     def selected_sound_path(self) -> str:
         selected = self.sound_var.get()
@@ -1008,7 +1082,7 @@ class AlarmApp(tk.Tk):
             tooltip = tk.Toplevel(window)
             tooltip.withdraw()
             tooltip.wm_overrideredirect(True)
-            tooltip.attributes("-topmost", True)
+            tooltip.transient(window)
             tk.Label(
                 tooltip,
                 text=text,
@@ -1108,6 +1182,7 @@ class AlarmApp(tk.Tk):
         sound_table.bind("<<TreeviewSelect>>", update_library_buttons)
         sound_table.bind("<Motion>", show_table_tooltip)
         sound_table.bind("<Leave>", hide_table_tooltip)
+        window.bind("<Unmap>", hide_table_tooltip, add="+")
         refresh_library()
         window.protocol("WM_DELETE_WINDOW", close_library)
         window.grab_set()
@@ -1225,6 +1300,7 @@ class AlarmApp(tk.Tk):
         if self.tray_icon is None:
             self.quit_application()
             return
+        self.hide_all_tooltips()
         self.withdraw()
         self.status_var.set("La aplicación continúa ejecutándose en la barra de tareas")
 
