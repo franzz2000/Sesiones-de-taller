@@ -1,5 +1,6 @@
 import json
 import shutil
+import socket
 import sys
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, time as dtime
@@ -46,6 +47,54 @@ DAY_LABELS = {
     "Sat": "Sábado",
     "Sun": "Domingo",
 }
+SINGLE_INSTANCE_PORT = 43827
+
+
+class SingleInstanceGuard:
+    """Keep one application instance and notify it when another is launched."""
+
+    def __init__(self, port: int = SINGLE_INSTANCE_PORT):
+        self.port = port
+        self.server: socket.socket | None = None
+
+    def acquire(self) -> bool:
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            server.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        try:
+            server.bind(("127.0.0.1", self.port))
+            server.listen(4)
+            server.setblocking(False)
+        except OSError:
+            server.close()
+            return False
+        self.server = server
+        self.port = server.getsockname()[1]
+        return True
+
+    def notify_existing(self) -> bool:
+        try:
+            with socket.create_connection(("127.0.0.1", self.port), timeout=0.5) as connection:
+                connection.sendall(b"ACTIVATE")
+            return True
+        except OSError:
+            return False
+
+    def activation_requested(self) -> bool:
+        if self.server is None:
+            return False
+        try:
+            connection, _address = self.server.accept()
+        except BlockingIOError:
+            return False
+        with connection:
+            connection.recv(64)
+        return True
+
+    def close(self):
+        if self.server is not None:
+            self.server.close()
+            self.server = None
 
 
 def normalize_time(value: str, *, ceil: bool) -> str:
@@ -308,8 +357,9 @@ class AudioPlayer:
 
 
 class AlarmApp(tk.Tk):
-    def __init__(self):
+    def __init__(self, single_instance_guard: SingleInstanceGuard | None = None):
         super().__init__()
+        self.single_instance_guard = single_instance_guard
         self.title("Programador de alarmas")
         if ICON_FILE.exists():
             self.app_icon = tk.PhotoImage(file=ICON_FILE)
@@ -347,6 +397,8 @@ class AlarmApp(tk.Tk):
         self.fit_window_to_content()
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self.after(200, self.scheduler_tick)
+        if self.single_instance_guard:
+            self.after(200, self.poll_single_instance)
 
         if pygame is None:
             messagebox.showwarning(
@@ -1017,6 +1069,23 @@ class AlarmApp(tk.Tk):
     def occurrence_key(self, alarm: Alarm, now: datetime) -> str:
         return f"{now.date()}|{id(alarm)}|{alarm.start}|{alarm.end}"
 
+    def poll_single_instance(self):
+        if not self.running or self.single_instance_guard is None:
+            return
+        if self.single_instance_guard.activation_requested():
+            self.restore_window()
+        self.after(200, self.poll_single_instance)
+
+    def restore_window(self):
+        self.deiconify()
+        self.lift()
+        self.focus_force()
+        if sys.platform == "darwin" and NSApplication:
+            NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+        else:
+            self.attributes("-topmost", True)
+            self.after(200, lambda: self.attributes("-topmost", False))
+
     def scheduler_tick(self):
         if not self.running:
             return
@@ -1047,8 +1116,17 @@ class AlarmApp(tk.Tk):
     def on_close(self):
         self.running = False
         self.stop_sound()
+        if self.single_instance_guard:
+            self.single_instance_guard.close()
         self.destroy()
 
 
 if __name__ == "__main__":
-    AlarmApp().mainloop()
+    instance_guard = SingleInstanceGuard()
+    if not instance_guard.acquire():
+        instance_guard.notify_existing()
+        raise SystemExit(0)
+    try:
+        AlarmApp(instance_guard).mainloop()
+    finally:
+        instance_guard.close()

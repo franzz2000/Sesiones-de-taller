@@ -1,9 +1,10 @@
 from pathlib import Path
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from app import (
     Alarm,
+    SingleInstanceGuard,
     alarm_issues,
     alarm_names_using_sound,
     format_duration,
@@ -87,6 +88,30 @@ class AlarmOverlapTests(unittest.TestCase):
         self.assertIn("Se solapa con «Reunión».", issues[0])
         self.assertIn("No se encuentra el fichero de sonido «missing-a.mp3».", issues[0])
         self.assertIn("Se solapa con «Trabajo».", issues[1])
+
+
+class SingleInstanceTests(unittest.TestCase):
+    @patch("app.socket.socket")
+    def test_first_instance_acquires_listener(self, socket_factory):
+        server = socket_factory.return_value
+        server.getsockname.return_value = ("127.0.0.1", 43827)
+        guard = SingleInstanceGuard()
+        self.assertTrue(guard.acquire())
+        server.bind.assert_called_once_with(("127.0.0.1", 43827))
+        server.listen.assert_called_once_with(4)
+
+    @patch("app.socket.socket")
+    def test_second_instance_cannot_acquire_listener(self, socket_factory):
+        socket_factory.return_value.bind.side_effect = OSError("already in use")
+        self.assertFalse(SingleInstanceGuard().acquire())
+
+    def test_activation_request_is_received(self):
+        connection = MagicMock()
+        guard = SingleInstanceGuard()
+        guard.server = MagicMock()
+        guard.server.accept.return_value = (connection, ("127.0.0.1", 12345))
+        self.assertTrue(guard.activation_requested())
+        connection.recv.assert_called_once_with(64)
 
 
 if __name__ == "__main__":

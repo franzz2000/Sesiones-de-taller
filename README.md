@@ -24,6 +24,7 @@ python app.py
 - Los MP3 se detectan automáticamente en la carpeta `sonidos` situada junto a `app.py`.
 - **Configuración → Biblioteca de sonidos** abre una ventana para añadir, reproducir o eliminar MP3. Antes de eliminar un sonido utilizado, se muestran las alarmas afectadas y se solicita confirmación.
 - La melodía se reproduce en bucle.
+- Solo se permite una instancia de la aplicación. Si vuelves a abrirla, se recupera y enfoca la ventana que ya estaba ejecutándose.
 
 ## Datos locales
 
