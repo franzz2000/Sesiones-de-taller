@@ -92,6 +92,11 @@ if NSObject is not None:
             )
             show_item.setTarget_(self)
             menu.addItem_(show_item)
+            settings_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                "Biblioteca de sonidos", "openSettings:", ""
+            )
+            settings_item.setTarget_(self)
+            menu.addItem_(settings_item)
             menu.addItem_(NSMenuItem.separatorItem())
             exit_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
                 "Salir", "quitApplication:", ""
@@ -104,6 +109,9 @@ if NSObject is not None:
 
         def showWindow_(self, _sender):
             self.commands.put("show")
+
+        def openSettings_(self, _sender):
+            self.commands.put("settings")
 
         def quitApplication_(self, _sender):
             self.commands.put("exit")
@@ -460,6 +468,102 @@ class AudioPlayer:
         self.current_alarms.clear()
 
 
+class TooltipManager:
+    """Own one popup, without entering Tk's event loop during its creation."""
+
+    def __init__(self, root, can_show):
+        self.root = root
+        self.can_show = can_show
+        self.window = None
+        self.owner = None
+        self.key = None
+        self._check_id = None
+
+    def bind_owner(self, owner):
+        def owner_unavailable(event):
+            if event.widget is owner:
+                self.hide(owner)
+
+        owner.bind("<Unmap>", owner_unavailable, add="+")
+        owner.bind("<Destroy>", owner_unavailable, add="+")
+        owner.bind("<FocusOut>", lambda _event: self.hide(owner), add="+")
+
+    def show(self, owner, key, text, x, y):
+        if not text or not self.can_show(owner):
+            self.hide(owner)
+            return
+        if self.window is not None and self.owner is owner and self.key == key:
+            return
+        self.hide()
+        # A synchronous Destroy callback may already have shown a newer popup.
+        if self.window is not None or not self.can_show(owner):
+            return
+        tooltip = tk.Toplevel(owner)
+        # Publish ownership BEFORE any operation that might dispatch Tk events.
+        self.window, self.owner, self.key = tooltip, owner, key
+
+        def destroyed(event):
+            if event.widget is tooltip and self.window is tooltip:
+                self._forget()
+
+        try:
+            tooltip.withdraw()
+            tooltip.bind("<Destroy>", destroyed, add="+")
+            tooltip.wm_overrideredirect(True)
+            tooltip.transient(owner)
+            label = tk.Label(
+                tooltip, text=text, justify="left", background="#fff8c6",
+                foreground="#000000", relief="solid", borderwidth=1,
+                padx=5, pady=3, wraplength=max(200, owner.winfo_screenwidth() - 40),
+            )
+            label.pack()
+            # Label requested size is synchronous; update_idletasks here can
+            # re-enter a hover callback and orphan the popup being constructed.
+            width, height = label.winfo_reqwidth(), label.winfo_reqheight()
+            x = max(0, min(x + 12, owner.winfo_screenwidth() - width))
+            y = max(0, min(y + 12, owner.winfo_screenheight() - height))
+            tooltip.geometry(f"{width}x{height}+{x}+{y}")
+            if self.window is not tooltip or not self.can_show(owner):
+                if self.window is tooltip:
+                    self.hide()
+                return
+            tooltip.deiconify()
+            if self.window is tooltip:
+                self._check_id = self.root.after(100, self._check_owner)
+        except tk.TclError:
+            # The owner may have been destroyed during a native callback.
+            if self.window is tooltip:
+                self.hide()
+
+    def _check_owner(self):
+        self._check_id = None
+        if self.window is None:
+            return
+        if not self.can_show(self.owner):
+            self.hide()
+        else:
+            self._check_id = self.root.after(100, self._check_owner)
+
+    def _forget(self):
+        self.window = self.owner = self.key = None
+        check_id, self._check_id = self._check_id, None
+        if check_id is not None:
+            self.root.after_cancel(check_id)
+
+    def hide(self, owner=None):
+        if owner is not None and self.owner is not owner:
+            return
+        tooltip = self.window
+        # Destroy/Unmap callbacks must see an empty state, never a stale cell.
+        self._forget()
+        if tooltip is not None:
+            try:
+                tooltip.withdraw()
+                tooltip.destroy()
+            except tk.TclError:
+                pass
+
+
 class AlarmApp(tk.Tk):
     def __init__(self, single_instance_guard: SingleInstanceGuard | None = None):
         super().__init__()
@@ -482,6 +586,7 @@ class AlarmApp(tk.Tk):
         self.form_mode = "idle"
         self.updating_form = False
         self.running = True
+        self.window_hidden = False
         self.tray_commands: queue.SimpleQueue[str] = queue.SimpleQueue()
         self.tray_icon = None
         self.last_tray_text = ""
@@ -494,10 +599,9 @@ class AlarmApp(tk.Tk):
         self.sound_var = tk.StringVar()
         self.volume_var = tk.IntVar(value=100)
         self.status_var = tk.StringVar(value="Listo")
-        self.sound_tooltip: tk.Toplevel | None = None
-        self.sound_tooltip_row: str | None = None
-        self.problem_tooltip: tk.Toplevel | None = None
-        self.problem_tooltip_row: str | None = None
+        self.sound_library_window: tk.Toplevel | None = None
+        self.tooltips = TooltipManager(self, self.can_show_tooltip)
+        self.tooltips.bind_owner(self)
 
         self.build_ui()
         self.bind("<Control-t>", self.create_test_alarm)
@@ -507,7 +611,7 @@ class AlarmApp(tk.Tk):
         self.setup_form_tracking()
         self.fit_window_to_content()
         self.protocol("WM_DELETE_WINDOW", self.on_close)
-        self.bind("<Unmap>", self.hide_all_tooltips, add="+")
+        self.bind("<Unmap>", self.on_window_unmap, add="+")
         self.start_tray_icon()
         self.after(200, self.poll_tray_commands)
         self.after(200, self.scheduler_tick)
@@ -543,12 +647,16 @@ class AlarmApp(tk.Tk):
         def request_show(_icon=None, _item=None):
             self.tray_commands.put("show")
 
+        def request_settings(_icon=None, _item=None):
+            self.tray_commands.put("settings")
+
         def request_exit(_icon=None, _item=None):
             self.tray_commands.put("exit")
 
         show_options = {"default": True} if pystray.Icon.HAS_DEFAULT_ACTION else {}
         menu = pystray.Menu(
             pystray.MenuItem("Mostrar ventana", request_show, **show_options),
+            pystray.MenuItem("Biblioteca de sonidos", request_settings),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Salir", request_exit),
         )
@@ -570,6 +678,9 @@ class AlarmApp(tk.Tk):
                 break
             if command == "show":
                 self.restore_window()
+            elif command == "settings":
+                self.restore_window()
+                self.after_idle(self.open_sound_library)
             elif command == "exit":
                 self.quit_application()
                 return
@@ -589,9 +700,7 @@ class AlarmApp(tk.Tk):
             app_menu = tk.Menu(menu_bar, name="apple", tearoff=False)
             app_menu.add_command(label="Acerca de Programador de alarmas", command=self.show_about)
             menu_bar.add_cascade(menu=app_menu)
-        settings_menu = tk.Menu(menu_bar, tearoff=False)
-        settings_menu.add_command(label="Biblioteca de sonidos", command=self.open_sound_library)
-        menu_bar.add_cascade(label="Configuración", menu=settings_menu)
+        menu_bar.add_command(label="Biblioteca de sonidos", command=self.open_sound_library)
         help_menu = tk.Menu(menu_bar, tearoff=False)
         help_menu.add_command(label="Cómo usar la aplicación", command=self.show_help)
         if sys.platform != "darwin":
@@ -607,7 +716,7 @@ class AlarmApp(tk.Tk):
             "Ayuda de Programador de alarmas",
             "1. Pulsa Nueva y escribe el nombre, los días y las horas de inicio y fin.\n\n"
             "2. Selecciona un sonido y su volumen, y pulsa Guardar.\n\n"
-            "3. Gestiona los MP3 desde Configuración → Biblioteca de sonidos.\n\n"
+            "3. Gestiona los MP3 desde Biblioteca de sonidos.\n\n"
             "4. Las filas naranjas indican horarios solapados y las rojas, sonidos ausentes. "
             "Sitúa el puntero sobre ⚠ para ver el problema.\n\n"
             "5. Detener sonido silencia las alarmas que estén sonando. Ctrl-T crea una alarma de prueba.",
@@ -687,7 +796,9 @@ class AlarmApp(tk.Tk):
         self.tree.pack(fill="both", expand=True)
         self.tree.bind("<<TreeviewSelect>>", self.load_selected_alarm)
         self.tree.bind("<Motion>", self.show_sound_tooltip)
-        self.tree.bind("<Leave>", lambda _event: self.hide_sound_tooltip())
+        self.tree.bind("<Leave>", lambda _event: self.tooltips.hide(self))
+        self.tree.bind("<ButtonPress>", lambda _event: self.tooltips.hide(self), add="+")
+        self.tree.bind("<MouseWheel>", lambda _event: self.tooltips.hide(self), add="+")
         self.tree.tag_configure("missing_sound", foreground="red")
         self.tree.tag_configure("overlapping", foreground="#d97706")
 
@@ -785,6 +896,7 @@ class AlarmApp(tk.Tk):
             self.sound_var.set(sound_label(self.sound_paths[0]) if self.sound_paths else "")
 
     def refresh_alarms(self):
+        self.hide_all_tooltips()
         self.tree.delete(*self.tree.get_children())
         overlapping = overlapping_alarm_indices(self.store.alarms)
         issues = alarm_issues(self.store.alarms)
@@ -808,87 +920,51 @@ class AlarmApp(tk.Tk):
                 tags=(tag,) if tag else (),
             )
 
+    def can_show_tooltip(self, owner):
+        if not self.running or self.window_hidden:
+            return False
+        try:
+            if not self.winfo_viewable() or not owner.winfo_exists() or not owner.winfo_viewable():
+                return False
+            if self.state() in ("withdrawn", "iconic") or owner.state() in ("withdrawn", "iconic"):
+                return False
+            focused = owner.focus_displayof()
+            if focused is None or focused.winfo_toplevel() is not owner:
+                return False
+            grab = self.grab_current()
+            return grab is None or grab.winfo_toplevel() is owner
+        except tk.TclError:
+            return False
+
     def show_sound_tooltip(self, event):
+        if not self.can_show_tooltip(self):
+            self.tooltips.hide(self)
+            return
         row_id = self.tree.identify_row(event.y)
         column_id = self.tree.identify_column(event.x)
-        if column_id == "#8" and row_id:
-            self.hide_sound_tooltip()
+        if not row_id or not self.tree.exists(row_id):
+            self.tooltips.hide(self)
+            return
+        if column_id == "#8":
             self.show_problem_tooltip(event, row_id)
-            return
-        self.hide_problem_tooltip()
-        if not row_id or column_id != "#7":
-            self.hide_sound_tooltip()
-            return
-        if self.sound_tooltip is not None and self.sound_tooltip_row == row_id:
-            return
-
-        alarm = self.store.alarms[int(row_id)]
-        self.hide_sound_tooltip()
-        tooltip = tk.Toplevel(self)
-        tooltip.withdraw()
-        tooltip.wm_overrideredirect(True)
-        tooltip.transient(self)
-        label = tk.Label(
-            tooltip,
-            text=Path(alarm.sound).name,
-            background="#fff8c6",
-            foreground="#000000",
-            relief="solid",
-            borderwidth=1,
-            padx=5,
-            pady=3,
-        )
-        label.pack()
-        tooltip.update_idletasks()
-        tooltip.geometry(f"+{event.x_root + 12}+{event.y_root + 12}")
-        tooltip.deiconify()
-        self.sound_tooltip = tooltip
-        self.sound_tooltip_row = row_id
+        elif column_id == "#7":
+            alarm = self.store.alarms[int(row_id)]
+            self.tooltips.show(self, (row_id, column_id), Path(alarm.sound).name,
+                               event.x_root, event.y_root)
+        else:
+            self.tooltips.hide(self)
 
     def show_problem_tooltip(self, event, row_id: str):
-        if self.problem_tooltip is not None and self.problem_tooltip_row == row_id:
-            return
         issues = alarm_issues(self.store.alarms).get(int(row_id), [])
-        if not issues:
-            return
-        self.hide_problem_tooltip()
-        tooltip = tk.Toplevel(self)
-        tooltip.withdraw()
-        tooltip.wm_overrideredirect(True)
-        tooltip.transient(self)
-        label = tk.Label(
-            tooltip,
-            text="\n".join(issues),
-            justify="left",
-            background="#fff8c6",
-            foreground="#000000",
-            relief="solid",
-            borderwidth=1,
-            padx=5,
-            pady=3,
-        )
-        label.pack()
-        tooltip.update_idletasks()
-        tooltip.geometry(f"+{event.x_root + 12}+{event.y_root + 12}")
-        tooltip.deiconify()
-        self.problem_tooltip = tooltip
-        self.problem_tooltip_row = row_id
-
-    def hide_sound_tooltip(self):
-        if self.sound_tooltip is not None:
-            self.sound_tooltip.destroy()
-            self.sound_tooltip = None
-            self.sound_tooltip_row = None
-
-    def hide_problem_tooltip(self):
-        if self.problem_tooltip is not None:
-            self.problem_tooltip.destroy()
-            self.problem_tooltip = None
-            self.problem_tooltip_row = None
+        self.tooltips.show(self, (row_id, "#8"), "\n".join(issues),
+                           event.x_root, event.y_root)
 
     def hide_all_tooltips(self, _event=None):
-        self.hide_sound_tooltip()
-        self.hide_problem_tooltip()
+        self.tooltips.hide()
+
+    def on_window_unmap(self, event):
+        if event.widget is self:
+            self.hide_all_tooltips()
 
     def selected_sound_path(self) -> str:
         selected = self.sound_var.get()
@@ -996,7 +1072,20 @@ class AlarmApp(tk.Tk):
         self.clear_form()
 
     def open_sound_library(self):
+        self.hide_all_tooltips()
+        if self.sound_library_window is not None:
+            try:
+                if self.sound_library_window.winfo_exists():
+                    self.sound_library_window.deiconify()
+                    self.sound_library_window.lift()
+                    self.sound_library_window.focus_force()
+                    return
+            except tk.TclError:
+                pass
+            self.sound_library_window = None
         window = tk.Toplevel(self)
+        self.sound_library_window = window
+        self.tooltips.bind_owner(window)
         window.title("Biblioteca de sonidos")
         window.transient(self)
         window.resizable(True, True)
@@ -1024,11 +1113,11 @@ class AlarmApp(tk.Tk):
         sound_table.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
         library_paths: list[Path] = []
-        table_tooltip: tk.Toplevel | None = None
-        tooltip_cell: tuple[str, str] | None = None
+        library_closing = False
 
         def refresh_library(selected_path: Path | None = None):
             nonlocal library_paths
+            self.tooltips.hide(window)
             library_paths = self.store.sounds()
             sound_table.delete(*sound_table.get_children())
             for index, path in enumerate(library_paths):
@@ -1060,46 +1149,24 @@ class AlarmApp(tk.Tk):
                 preview_button.state(["disabled"])
 
         def hide_table_tooltip(_event=None):
-            nonlocal table_tooltip, tooltip_cell
-            if table_tooltip is not None:
-                table_tooltip.destroy()
-                table_tooltip = None
-            tooltip_cell = None
+            self.tooltips.hide(window)
 
         def show_table_tooltip(event):
-            nonlocal table_tooltip, tooltip_cell
+            if library_closing or not self.can_show_tooltip(window):
+                hide_table_tooltip()
+                return
             row_id = sound_table.identify_row(event.y)
             column_id = sound_table.identify_column(event.x)
             column_name = {"#1": "name", "#2": "file"}.get(column_id)
-            if not row_id or column_name is None:
+            if not row_id or column_name is None or not sound_table.exists(row_id):
                 hide_table_tooltip()
                 return
-            cell = (row_id, column_name)
-            if cell == tooltip_cell:
-                return
             text = sound_table.set(row_id, column_name)
-            hide_table_tooltip()
-            tooltip = tk.Toplevel(window)
-            tooltip.withdraw()
-            tooltip.wm_overrideredirect(True)
-            tooltip.transient(window)
-            tk.Label(
-                tooltip,
-                text=text,
-                background="#fff8c6",
-                foreground="#000000",
-                relief="solid",
-                borderwidth=1,
-                padx=5,
-                pady=3,
-            ).pack()
-            tooltip.update_idletasks()
-            tooltip.geometry(f"+{event.x_root + 12}+{event.y_root + 12}")
-            tooltip.deiconify()
-            table_tooltip = tooltip
-            tooltip_cell = cell
+            self.tooltips.show(window, (row_id, column_name), text,
+                               event.x_root, event.y_root)
 
         def add_library_sound():
+            hide_table_tooltip()
             filename = filedialog.askopenfilename(parent=window, filetypes=[("Ficheros MP3", "*.mp3")])
             if not filename:
                 return
@@ -1110,6 +1177,7 @@ class AlarmApp(tk.Tk):
             self.status_var.set(f"Movido a sonidos/{added.name}")
 
         def remove_library_sound():
+            hide_table_tooltip()
             sound_path = selected_library_sound()
             if sound_path is None:
                 messagebox.showwarning("Selecciona un sonido", "Selecciona el MP3 que quieres eliminar.", parent=window)
@@ -1139,6 +1207,7 @@ class AlarmApp(tk.Tk):
             self.status_var.set(f"Sonido eliminado: {sound_path.name}")
 
         def play_library_sound():
+            hide_table_tooltip()
             if self.player and self.player.is_previewing:
                 self.player.stop_preview()
                 preview_button.config(text="Reproducir")
@@ -1166,10 +1235,23 @@ class AlarmApp(tk.Tk):
                 preview_button.config(text="Reproducir")
 
         def close_library():
+            nonlocal library_closing
+            library_closing = True
             if self.player:
                 self.player.stop_preview()
             hide_table_tooltip()
+            self.sound_library_window = None
             window.destroy()
+
+        def library_destroyed(event):
+            nonlocal library_closing
+            if event.widget is window:
+                library_closing = True
+                hide_table_tooltip()
+                if self.sound_library_window is window:
+                    self.sound_library_window = None
+                if self.player:
+                    self.player.stop_preview()
 
         buttons = ttk.Frame(content)
         buttons.pack(fill="x")
@@ -1182,7 +1264,9 @@ class AlarmApp(tk.Tk):
         sound_table.bind("<<TreeviewSelect>>", update_library_buttons)
         sound_table.bind("<Motion>", show_table_tooltip)
         sound_table.bind("<Leave>", hide_table_tooltip)
-        window.bind("<Unmap>", hide_table_tooltip, add="+")
+        sound_table.bind("<ButtonPress>", hide_table_tooltip, add="+")
+        sound_table.bind("<MouseWheel>", hide_table_tooltip, add="+")
+        window.bind("<Destroy>", library_destroyed, add="+")
         refresh_library()
         window.protocol("WM_DELETE_WINDOW", close_library)
         window.grab_set()
@@ -1259,6 +1343,7 @@ class AlarmApp(tk.Tk):
         self.after(200, self.poll_single_instance)
 
     def restore_window(self):
+        self.window_hidden = False
         self.deiconify()
         self.lift()
         self.focus_force()
@@ -1300,12 +1385,14 @@ class AlarmApp(tk.Tk):
         if self.tray_icon is None:
             self.quit_application()
             return
+        self.window_hidden = True
         self.hide_all_tooltips()
         self.withdraw()
         self.status_var.set("La aplicación continúa ejecutándose en la barra de tareas")
 
     def quit_application(self):
         self.running = False
+        self.hide_all_tooltips()
         self.stop_sound()
         if self.tray_icon is not None:
             self.tray_icon.stop()

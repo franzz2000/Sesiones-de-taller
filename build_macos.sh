@@ -47,7 +47,7 @@ if [[ "$HOST_ARCH" != "$PYTHON_ARCH" ]]; then
     exit 1
 fi
 
-for command in sips iconutil hdiutil; do
+for command in sips iconutil hdiutil codesign; do
     if ! command -v "$command" >/dev/null 2>&1; then
         echo "Error: falta la herramienta de macOS '$command'." >&2
         exit 1
@@ -91,6 +91,11 @@ echo "Configurando la aplicación para que no aparezca en el Dock..."
 INFO_PLIST="$DIST_DIR/$APP_NAME.app/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Delete :LSUIElement" "$INFO_PLIST" >/dev/null 2>&1 || true
 /usr/libexec/PlistBuddy -c "Add :LSUIElement bool true" "$INFO_PLIST"
+
+# Changing Info.plist invalidates the ad-hoc bundle signature from PyInstaller.
+echo "Actualizando y verificando la firma local del bundle..."
+codesign --force --sign - "$DIST_DIR/$APP_NAME.app"
+codesign --verify --deep --strict "$DIST_DIR/$APP_NAME.app"
 
 echo "Creando la imagen DMG..."
 rm -rf "$DMG_STAGE_DIR" "$DMG_FILE"
