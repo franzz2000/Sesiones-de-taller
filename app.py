@@ -585,14 +585,14 @@ class AudioPlayer:
 
 
 class TooltipManager:
-    """Own a delayed popup, without entering Tk's event loop during creation."""
+    """Own one delayed, square-corner tooltip inside its parent window."""
 
     DELAY_MS = 1000
 
     def __init__(self, root, can_show):
         self.root = root
         self.can_show = can_show
-        self.window = None
+        self.widget = None
         self.owner = None
         self.key = None
         self._check_id = None
@@ -612,7 +612,7 @@ class TooltipManager:
         if not text or not self.can_show(owner):
             self.hide(owner)
             return
-        if self.window is not None and self.owner is owner and self.key == key:
+        if self.widget is not None and self.owner is owner and self.key == key:
             return
         if self.pending is not None:
             pending_owner, pending_key, _, _, _ = self.pending
@@ -621,7 +621,7 @@ class TooltipManager:
                 return
         self.hide()
         # A synchronous Destroy callback may already have scheduled a newer popup.
-        if self.window is not None or self.pending is not None or not self.can_show(owner):
+        if self.widget is not None or self.pending is not None or not self.can_show(owner):
             return
         self.pending = (owner, key, text, x, y)
         self._show_id = self.root.after(self.DELAY_MS, self._show_pending)
@@ -634,20 +634,18 @@ class TooltipManager:
         owner, key, text, x, y = pending
         if not text or not self.can_show(owner):
             return
-        tooltip = tk.Toplevel(owner)
+        # A native Toplevel keeps macOS's rounded window corners even when its
+        # child label has a square border. Use an ordinary child widget instead.
+        tooltip = tk.Frame(owner, background="#000000", borderwidth=0, highlightthickness=0)
         # Publish ownership BEFORE any operation that might dispatch Tk events.
-        self.window, self.owner, self.key = tooltip, owner, key
+        self.widget, self.owner, self.key = tooltip, owner, key
 
         def destroyed(event):
-            if event.widget is tooltip and self.window is tooltip:
+            if event.widget is tooltip and self.widget is tooltip:
                 self._forget()
 
         try:
-            tooltip.withdraw()
             tooltip.bind("<Destroy>", destroyed, add="+")
-            tooltip.wm_overrideredirect(True)
-            tooltip.transient(owner)
-            tooltip.configure(background="#000000")
             label = tk.Label(
                 tooltip, text=text, justify="left", background="#fff8c6",
                 foreground="#000000", relief="flat", borderwidth=0,
@@ -656,27 +654,35 @@ class TooltipManager:
                 padx=10, pady=3, wraplength=max(200, owner.winfo_screenwidth() - 40),
             )
             label.pack()
-            # Label requested size is synchronous; update_idletasks here can
-            # re-enter a hover callback and orphan the popup being constructed.
+            # Requested sizes are synchronous; update_idletasks here can
+            # re-enter a hover callback and orphan the tooltip being constructed.
             width, height = label.winfo_reqwidth(), label.winfo_reqheight()
-            x = max(0, min(x + 12, owner.winfo_screenwidth() - width))
-            y = max(0, min(y + 12, owner.winfo_screenheight() - height))
-            tooltip.geometry(f"{width}x{height}+{x}+{y}")
-            if self.window is not tooltip or not self.can_show(owner):
-                if self.window is tooltip:
+            owner_x, owner_y = owner.winfo_rootx(), owner.winfo_rooty()
+            owner_width, owner_height = owner.winfo_width(), owner.winfo_height()
+            edge_margin = 10
+
+            max_x = max(edge_margin, owner_width - width - edge_margin)
+            max_y = max(edge_margin, owner_height - height - edge_margin)
+
+            x = max(edge_margin, min(x - owner_x + 12, max_x))
+            y = max(edge_margin, min(y - owner_y + 12, max_y))
+            tooltip.place(x=x, y=y)
+
+            tooltip.lift()
+            if self.widget is not tooltip or not self.can_show(owner):
+                if self.widget is tooltip:
                     self.hide()
                 return
-            tooltip.deiconify()
-            if self.window is tooltip:
+            if self.widget is tooltip:
                 self._check_id = self.root.after(100, self._check_owner)
         except tk.TclError:
-            # The owner may have been destroyed during a native callback.
-            if self.window is tooltip:
+            # The owner may have been destroyed during a Tk callback.
+            if self.widget is tooltip:
                 self.hide()
 
     def _check_owner(self):
         self._check_id = None
-        if self.window is None:
+        if self.widget is None:
             return
         if not self.can_show(self.owner):
             self.hide()
@@ -684,7 +690,7 @@ class TooltipManager:
             self._check_id = self.root.after(100, self._check_owner)
 
     def _forget(self):
-        self.window = self.owner = self.key = None
+        self.widget = self.owner = self.key = None
         check_id, self._check_id = self._check_id, None
         show_id, self._show_id = self._show_id, None
         self.pending = None
@@ -698,12 +704,11 @@ class TooltipManager:
             pending_owner = self.pending[0] if self.pending is not None else None
             if self.owner is not owner and pending_owner is not owner:
                 return
-        tooltip = self.window
+        tooltip = self.widget
         # Destroy/Unmap callbacks must see an empty state, never a stale cell.
         self._forget()
         if tooltip is not None:
             try:
-                tooltip.withdraw()
                 tooltip.destroy()
             except tk.TclError:
                 pass
