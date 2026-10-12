@@ -1,8 +1,10 @@
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+import struct
 import unittest
 from unittest.mock import MagicMock, patch
 
+import app
 from app import (
     Alarm,
     SingleInstanceGuard,
@@ -15,6 +17,160 @@ from app import (
     sound_title,
     tray_status_text,
 )
+
+
+def require_clock_api(name):
+    """Fail with a focused message while clock production code is pending."""
+    try:
+        return getattr(app, name)
+    except AttributeError as exc:
+        raise AssertionError(f"app.{name} has not been implemented") from exc
+
+
+class AdjustableClockTests(unittest.TestCase):
+    def test_unavailable_ntp_keeps_alarms_on_system_clock_and_warns(self):
+        app_instance = object.__new__(app.AlarmApp)
+        app_instance.running = True
+        app_instance.clock = app.AdjustableClock(offset_seconds=42)
+        app_instance.clock_manually_set = False
+        app_instance.ntp_results = app.queue.SimpleQueue()
+        app_instance.ntp_results.put((False, "network unavailable"))
+        app_instance.ntp_sync_finished = False
+
+        with patch("app.messagebox.showwarning") as warning:
+            app.AlarmApp.poll_ntp_result(app_instance)
+
+        self.assertEqual(app_instance.clock.offset_seconds, 0)
+        warning.assert_called_once()
+        self.assertIn("servidor horario NTP", warning.call_args.args[1])
+
+    def test_unavailable_ntp_does_not_clear_a_manual_adjustment(self):
+        app_instance = object.__new__(app.AlarmApp)
+        app_instance.running = True
+        app_instance.clock = app.AdjustableClock(offset_seconds=42)
+        app_instance.clock_manually_set = True
+        app_instance.ntp_results = app.queue.SimpleQueue()
+        app_instance.ntp_results.put((False, "network unavailable"))
+        app_instance.ntp_sync_finished = False
+
+        with patch("app.messagebox.showwarning") as warning:
+            app.AlarmApp.poll_ntp_result(app_instance)
+
+        self.assertEqual(app_instance.clock.offset_seconds, 42)
+        self.assertIn("hora ajustada manualmente", warning.call_args.args[1])
+
+    def test_offset_is_applied_to_system_time(self):
+        clock_type = require_clock_api("AdjustableClock")
+        system_now = datetime(2026, 10, 12, 10, 20, 30)
+        clock = clock_type(offset_seconds=90)
+
+        self.assertEqual(clock.now(system_now), system_now + timedelta(seconds=90))
+
+    def test_network_time_sets_offset_without_changing_system_clock(self):
+        clock_type = require_clock_api("AdjustableClock")
+        system_now = datetime(2026, 10, 12, 10, 20, 30)
+        network_now = datetime(2026, 10, 12, 10, 18, 0)
+        clock = clock_type()
+
+        clock.set_from_network(network_now, system_now=system_now)
+
+        self.assertEqual(clock.now(system_now), network_now)
+
+    def test_manual_time_adjustment_changes_virtual_time_of_day(self):
+        clock_type = require_clock_api("AdjustableClock")
+        system_now = datetime(2026, 10, 12, 10, 20, 30)
+        clock = clock_type()
+
+        clock.set_adjusted_time("09:15:45", system_now=system_now)
+
+        self.assertEqual(clock.now(system_now), datetime(2026, 10, 12, 9, 15, 45))
+
+    def test_manual_time_adjustment_rejects_invalid_time(self):
+        clock_type = require_clock_api("AdjustableClock")
+        clock = clock_type()
+
+        with self.assertRaises(ValueError):
+            clock.set_adjusted_time("25:61:00", system_now=datetime(2026, 10, 12))
+
+
+class NtpResponseTests(unittest.TestCase):
+    @staticmethod
+    def response_packet(network_utc):
+        packet = bytearray(48)
+        packet[0] = 0x24  # LI=0, NTP version 4, server response mode.
+        packet[1] = 1  # Primary reference.
+        unix_seconds = network_utc.timestamp()
+        ntp_seconds = int(unix_seconds) + 2_208_988_800
+        fraction = round((unix_seconds % 1) * (1 << 32))
+        struct.pack_into("!II", packet, 40, ntp_seconds, fraction)
+        return bytes(packet)
+
+    def test_parses_transmit_timestamp_to_local_naive_datetime(self):
+        parse_ntp_response = require_clock_api("parse_ntp_response")
+        network_utc = datetime(2026, 10, 12, 8, 20, 30, 250000, tzinfo=timezone.utc)
+
+        parsed = parse_ntp_response(self.response_packet(network_utc))
+
+        expected = datetime.fromtimestamp(network_utc.timestamp())
+        self.assertIsNone(parsed.tzinfo)
+        self.assertLessEqual(abs((parsed - expected).total_seconds()), 0.00001)
+
+    def test_rejects_packet_with_invalid_length(self):
+        parse_ntp_response = require_clock_api("parse_ntp_response")
+
+        with self.assertRaises(ValueError):
+            parse_ntp_response(bytes(47))
+
+    def test_rejects_non_server_response(self):
+        parse_ntp_response = require_clock_api("parse_ntp_response")
+        packet = bytearray(self.response_packet(datetime(2026, 10, 12, tzinfo=timezone.utc)))
+        packet[0] = 0x23  # NTP client mode, not a server response.
+
+        with self.assertRaises(ValueError):
+            parse_ntp_response(bytes(packet))
+
+    def test_query_uses_four_timestamps_and_validates_origin(self):
+        t1 = 1_800_000_000.0
+        t2 = t1 + 2.0
+        t3 = t1 + 2.1
+        t4 = t1 + 0.2
+        packet = bytearray(48)
+        packet[0] = 0x24
+        packet[1] = 1
+        packet[24:32] = app._encode_ntp_timestamp(t1)
+        packet[32:40] = app._encode_ntp_timestamp(t2)
+        packet[40:48] = app._encode_ntp_timestamp(t3)
+
+        client = MagicMock()
+        client.__enter__.return_value = client
+        client.recvfrom.return_value = (bytes(packet), ("127.0.0.1", 123))
+
+        with (
+            patch("app.socket.getaddrinfo", return_value=[(2, 2, 17, "", ("127.0.0.1", 123))]),
+            patch("app.socket.socket", return_value=client),
+            patch("app.time.time", side_effect=[t1, t4]),
+            patch("app.time.monotonic", side_effect=[10.0, 10.1]),
+        ):
+            received = app.query_ntp_time("time.example")
+
+        self.assertAlmostEqual(received.timestamp(), t1 + 2.15, places=3)
+        self.assertEqual(client.sendto.call_args.args[0][40:48], packet[24:32])
+
+    def test_query_rejects_response_for_another_request(self):
+        packet = bytearray(self.response_packet(datetime(2026, 10, 12, tzinfo=timezone.utc)))
+        packet[24:32] = app._encode_ntp_timestamp(1_800_000_000)
+        client = MagicMock()
+        client.__enter__.return_value = client
+        client.recvfrom.return_value = (bytes(packet), ("127.0.0.1", 123))
+
+        with (
+            patch("app.socket.getaddrinfo", return_value=[(2, 2, 17, "", ("127.0.0.1", 123))]),
+            patch("app.socket.socket", return_value=client),
+            patch("app.time.time", side_effect=[1_800_000_000, 1_800_000_000.1]),
+            patch("app.time.monotonic", side_effect=[10.0, 10.1]),
+        ):
+            with self.assertRaises(ValueError):
+                app.query_ntp_time("time.example")
 
 
 class NormalizeTimeTests(unittest.TestCase):

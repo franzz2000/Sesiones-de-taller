@@ -32,6 +32,7 @@ class TooltipGuiTests(unittest.TestCase):
             patch("app.AlarmStore", return_value=store),
             patch("app.AudioPlayer", return_value=None),
             patch.object(app.AlarmApp, "start_tray_icon"),
+            patch.object(app.AlarmApp, "start_ntp_sync"),
             patch.object(app.AlarmApp, "scheduler_tick"),
         ):
             patcher.start()

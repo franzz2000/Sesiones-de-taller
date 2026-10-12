@@ -2,7 +2,10 @@ import json
 import queue
 import shutil
 import socket
+import struct
 import sys
+import threading
+import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, time as dtime
 from pathlib import Path
@@ -67,6 +70,111 @@ DAY_LABELS = {
     "Sun": "Domingo",
 }
 SINGLE_INSTANCE_PORT = 43827
+NTP_SERVER = "pool.ntp.org"
+NTP_TIMEOUT_SECONDS = 3.0
+CLOCK_SKEW_THRESHOLD_SECONDS = 5.0
+NTP_EPOCH_DELTA = 2_208_988_800
+
+
+class AdjustableClock:
+    """A process-local clock offset; it never changes the operating-system clock."""
+
+    def __init__(self, offset_seconds: float = 0.0):
+        self.offset_seconds = float(offset_seconds)
+
+    def now(self, system_now: datetime | None = None) -> datetime:
+        return (system_now or datetime.now()) + timedelta(seconds=self.offset_seconds)
+
+    def set_from_network(
+        self, network_now: datetime, system_now: datetime | None = None
+    ) -> None:
+        self.offset_seconds = (network_now - (system_now or datetime.now())).total_seconds()
+
+    def set_adjusted_time(
+        self, value: str, system_now: datetime | None = None
+    ) -> None:
+        try:
+            adjusted_time = datetime.strptime(value.strip(), "%H:%M:%S").time()
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Introduce la hora en formato HH:MM:SS.") from exc
+        if adjusted_time.tzinfo is not None:
+            raise ValueError("La hora no debe incluir zona horaria.")
+        current = system_now or datetime.now()
+        target = current.replace(
+            hour=adjusted_time.hour,
+            minute=adjusted_time.minute,
+            second=adjusted_time.second,
+            microsecond=adjusted_time.microsecond,
+        )
+        self.offset_seconds = (target - current).total_seconds()
+
+
+def parse_ntp_response(packet: bytes) -> datetime:
+    """Validate an NTP server reply and return its transmit time in local time."""
+    if len(packet) < 48:
+        raise ValueError("La respuesta NTP está incompleta.")
+    leap_indicator = packet[0] >> 6
+    mode = packet[0] & 0b111
+    stratum = packet[1]
+    if leap_indicator == 3 or stratum == 0 or stratum > 15:
+        raise ValueError("El servidor NTP no está sincronizado.")
+    if mode != 4:
+        raise ValueError("La respuesta recibida no procede de un servidor NTP.")
+    seconds, fraction = struct.unpack("!II", packet[40:48])
+    if seconds == 0:
+        raise ValueError("La respuesta NTP no contiene una hora válida.")
+    unix_timestamp = seconds - NTP_EPOCH_DELTA + fraction / 2**32
+    return datetime.fromtimestamp(unix_timestamp)
+
+
+def _ntp_timestamp_seconds(packet: bytes, offset: int) -> float:
+    seconds, fraction = struct.unpack("!II", packet[offset : offset + 8])
+    if seconds == 0 and fraction == 0:
+        raise ValueError("La respuesta NTP no contiene una hora válida.")
+    return seconds - NTP_EPOCH_DELTA + fraction / 2**32
+
+
+def _encode_ntp_timestamp(unix_timestamp: float) -> bytes:
+    ntp_timestamp = unix_timestamp + NTP_EPOCH_DELTA
+    seconds = int(ntp_timestamp)
+    fraction = int((ntp_timestamp - seconds) * 2**32)
+    return struct.pack("!II", seconds, fraction)
+
+
+def query_ntp_time(
+    server: str = NTP_SERVER, timeout: float = NTP_TIMEOUT_SECONDS
+) -> datetime:
+    """Fetch verified time over UDP without changing the system clock."""
+    request = bytearray(48)
+    request[0] = 0b00_011_011  # LI=0, VN=3, client mode
+    addresses = socket.getaddrinfo(server, 123, type=socket.SOCK_DGRAM)
+    last_error: OSError | ValueError | None = None
+    deadline = time.monotonic() + timeout
+    for family, socktype, protocol, _canonical_name, address in addresses:
+        try:
+            with socket.socket(family, socktype, protocol) as client:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise socket.timeout("Se agotó el tiempo de espera de NTP.")
+                client.settimeout(remaining)
+                t1 = time.time()
+                request[40:48] = _encode_ntp_timestamp(t1)
+                request_origin = bytes(request[40:48])
+                client.sendto(request, address)
+                response, _ = client.recvfrom(512)
+            t4 = time.time()
+            parse_ntp_response(response)
+            if response[24:32] != request_origin:
+                raise ValueError("La respuesta NTP no coincide con la solicitud enviada.")
+            t2 = _ntp_timestamp_seconds(response, 32)
+            t3 = _ntp_timestamp_seconds(response, 40)
+            offset = ((t2 - t1) + (t3 - t4)) / 2
+            return datetime.fromtimestamp(t4 + offset)
+        except (OSError, ValueError) as exc:
+            last_error = exc
+    if last_error:
+        raise last_error
+    raise OSError("No se han encontrado direcciones para el servidor NTP.")
 
 
 if NSObject is not None:
@@ -97,6 +205,11 @@ if NSObject is not None:
             )
             settings_item.setTarget_(self)
             menu.addItem_(settings_item)
+            clock_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                "Ajustar hora", "adjustClock:", ""
+            )
+            clock_item.setTarget_(self)
+            menu.addItem_(clock_item)
             menu.addItem_(NSMenuItem.separatorItem())
             exit_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
                 "Salir", "quitApplication:", ""
@@ -112,6 +225,9 @@ if NSObject is not None:
 
         def openSettings_(self, _sender):
             self.commands.put("settings")
+
+        def adjustClock_(self, _sender):
+            self.commands.put("clock")
 
         def quitApplication_(self, _sender):
             self.commands.put("exit")
@@ -514,7 +630,7 @@ class TooltipManager:
             label = tk.Label(
                 tooltip, text=text, justify="left", background="#fff8c6",
                 foreground="#000000", relief="solid", borderwidth=1,
-                padx=5, pady=3, wraplength=max(200, owner.winfo_screenwidth() - 40),
+                padx=10, pady=3, wraplength=max(200, owner.winfo_screenwidth() - 40),
             )
             label.pack()
             # Label requested size is synchronous; update_idletasks here can
@@ -591,6 +707,11 @@ class AlarmApp(tk.Tk):
         self.tray_icon = None
         self.last_tray_text = ""
         self.silenced_occurrences: set[str] = set()
+        self.clock = AdjustableClock()
+        self.clock_manually_set = False
+        self.ntp_results: queue.SimpleQueue[tuple[bool, datetime | str]] = queue.SimpleQueue()
+        self.ntp_sync_finished = False
+        self.clock_dialog: tk.Toplevel | None = None
         self.day_vars = {day: tk.BooleanVar() for day in DAYS}
         self.enabled_var = tk.BooleanVar(value=True)
         self.name_var = tk.StringVar()
@@ -614,6 +735,7 @@ class AlarmApp(tk.Tk):
         self.bind("<Unmap>", self.on_window_unmap, add="+")
         self.start_tray_icon()
         self.after(200, self.poll_tray_commands)
+        self.after(200, self.poll_ntp_result)
         self.after(200, self.scheduler_tick)
         if self.single_instance_guard:
             self.after(200, self.poll_single_instance)
@@ -623,6 +745,8 @@ class AlarmApp(tk.Tk):
                 "Falta dependencia",
                 "Instala pygame-ce para reproducir MP3:\n\npython -m pip install -r requirements.txt",
             )
+
+        self.start_ntp_sync()
 
         if sys.platform != "darwin" and (pystray is None or Image is None):
             messagebox.showwarning(
@@ -635,7 +759,7 @@ class AlarmApp(tk.Tk):
         if not ICON_FILE.exists():
             return
 
-        self.last_tray_text = tray_status_text(self.store.alarms, datetime.now())
+        self.last_tray_text = tray_status_text(self.store.alarms, self.clock.now())
         if sys.platform == "darwin" and MacTrayIcon is not None:
             self.tray_icon = MacTrayIcon.alloc().init().configure(
                 ICON_FILE, self.last_tray_text, self.tray_commands
@@ -650,6 +774,9 @@ class AlarmApp(tk.Tk):
         def request_settings(_icon=None, _item=None):
             self.tray_commands.put("settings")
 
+        def request_clock(_icon=None, _item=None):
+            self.tray_commands.put("clock")
+
         def request_exit(_icon=None, _item=None):
             self.tray_commands.put("exit")
 
@@ -657,6 +784,7 @@ class AlarmApp(tk.Tk):
         menu = pystray.Menu(
             pystray.MenuItem("Mostrar ventana", request_show, **show_options),
             pystray.MenuItem("Biblioteca de sonidos", request_settings),
+            pystray.MenuItem("Ajustar hora", request_clock),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Salir", request_exit),
         )
@@ -681,6 +809,9 @@ class AlarmApp(tk.Tk):
             elif command == "settings":
                 self.restore_window()
                 self.after_idle(self.open_sound_library)
+            elif command == "clock":
+                self.restore_window()
+                self.after_idle(self.open_clock_settings)
             elif command == "exit":
                 self.quit_application()
                 return
@@ -701,6 +832,7 @@ class AlarmApp(tk.Tk):
             app_menu.add_command(label="Acerca de Programador de alarmas", command=self.show_about)
             menu_bar.add_cascade(menu=app_menu)
         menu_bar.add_command(label="Biblioteca de sonidos", command=self.open_sound_library)
+        menu_bar.add_command(label="Ajustar hora", command=self.open_clock_settings)
         help_menu = tk.Menu(menu_bar, tearoff=False)
         help_menu.add_command(label="Cómo usar la aplicación", command=self.show_help)
         if sys.platform != "darwin":
@@ -710,6 +842,139 @@ class AlarmApp(tk.Tk):
         self.config(menu=menu_bar)
         if sys.platform == "darwin":
             self.tk.createcommand("tkAboutDialog", self.show_about)
+
+    def start_ntp_sync(self):
+        def synchronize():
+            try:
+                self.ntp_results.put((True, query_ntp_time()))
+            except Exception as exc:
+                self.ntp_results.put((False, str(exc)))
+
+        threading.Thread(target=synchronize, name="ntp-clock-sync", daemon=True).start()
+
+    def poll_ntp_result(self):
+        if not self.running:
+            return
+        try:
+            succeeded, result = self.ntp_results.get_nowait()
+        except queue.Empty:
+            self.after(200, self.poll_ntp_result)
+            return
+        if self.ntp_sync_finished:
+            return
+        self.ntp_sync_finished = True
+        if not succeeded:
+            if not self.clock_manually_set:
+                self.clock.offset_seconds = 0.0
+            fallback_message = (
+                "Se mantendrá la hora ajustada manualmente."
+                if self.clock_manually_set
+                else "Las alarmas seguirán la hora del sistema. Puedes ajustar la hora "
+                "manualmente desde el menú «Ajustar hora»."
+            )
+            messagebox.showwarning(
+                "No se pudo comprobar la hora real",
+                "No se ha podido conectar con el servidor horario NTP. "
+                f"{fallback_message}\n\n"
+                f"Detalle: {result}",
+                parent=self,
+            )
+            return
+
+        if self.clock_manually_set:
+            return
+
+        network_now = result
+        system_now = datetime.now()
+        difference = (network_now - system_now).total_seconds()
+        if abs(difference) >= CLOCK_SKEW_THRESHOLD_SECONDS:
+            use_network_time = messagebox.askyesno(
+                "Diferencia entre las horas",
+                "La hora del sistema y la hora real de la red no coinciden.\n\n"
+                f"Hora del sistema: {system_now:%H:%M:%S}\n"
+                f"Hora real (NTP): {network_now:%H:%M:%S}\n\n"
+                "¿Quieres que las alarmas sigan la hora real de la red?\n"
+                "Si eliges No, seguirán la hora del sistema.",
+                parent=self,
+            )
+            if not use_network_time:
+                self.clock.offset_seconds = 0.0
+        else:
+            self.clock.set_from_network(network_now, system_now)
+        if abs(difference) >= CLOCK_SKEW_THRESHOLD_SECONDS and use_network_time:
+            self.clock.set_from_network(network_now, system_now)
+        self.update_tray_status(self.clock.now())
+        self.status_var.set("Hora real de red aplicada" if self.clock.offset_seconds else "Hora del sistema aplicada")
+
+    def open_clock_settings(self):
+        if self.clock_dialog is not None:
+            try:
+                if self.clock_dialog.winfo_exists():
+                    self.clock_dialog.deiconify()
+                    self.clock_dialog.lift()
+                    self.clock_dialog.focus_force()
+                    return
+            except tk.TclError:
+                pass
+
+        window = tk.Toplevel(self)
+        self.clock_dialog = window
+        window.title("Ajustar hora")
+        window.transient(self)
+        window.resizable(False, False)
+        content = ttk.Frame(window, padding=14)
+        content.pack(fill="both", expand=True)
+
+        system_time_var = tk.StringVar()
+        adjusted_time_var = tk.StringVar()
+        ttk.Label(content, text="Hora del sistema").grid(row=0, column=0, sticky="w", pady=4)
+        ttk.Label(content, textvariable=system_time_var).grid(row=0, column=1, sticky="w", padx=(12, 0))
+        ttk.Label(content, text="Hora ajustada").grid(row=1, column=0, sticky="w", pady=4)
+        ttk.Label(content, textvariable=adjusted_time_var).grid(row=1, column=1, sticky="w", padx=(12, 0))
+        ttk.Label(content, text="Nueva hora ajustada (HH:MM:SS)").grid(
+            row=2, column=0, sticky="w", pady=(12, 4)
+        )
+        adjusted_entry_var = tk.StringVar(value=self.clock.now().strftime("%H:%M:%S"))
+        entry = ttk.Entry(content, textvariable=adjusted_entry_var, width=12)
+        entry.grid(row=2, column=1, sticky="w", padx=(12, 0), pady=(12, 4))
+
+        def close_dialog():
+            if self.clock_dialog is window:
+                self.clock_dialog = None
+            window.destroy()
+
+        def save_adjusted_time():
+            try:
+                self.clock.set_adjusted_time(adjusted_entry_var.get())
+            except ValueError as exc:
+                messagebox.showerror("Formato de hora no válido", str(exc), parent=window)
+                entry.focus_set()
+                entry.selection_range(0, tk.END)
+                return
+            self.clock_manually_set = True
+            self.update_tray_status(self.clock.now())
+            self.status_var.set("Hora ajustada manualmente")
+            close_dialog()
+
+        buttons = ttk.Frame(content)
+        buttons.grid(row=3, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        ttk.Button(buttons, text="Guardar", command=save_adjusted_time).pack(side="left")
+        ttk.Button(buttons, text="Cancelar", command=close_dialog).pack(side="left", padx=(6, 0))
+
+        def update_clock_labels():
+            if not window.winfo_exists():
+                return
+            system_now = datetime.now()
+            system_time_var.set(system_now.strftime("%H:%M:%S"))
+            adjusted_time_var.set(self.clock.now(system_now).strftime("%H:%M:%S"))
+            window.after(250, update_clock_labels)
+
+        window.protocol("WM_DELETE_WINDOW", close_dialog)
+        window.bind("<Destroy>", lambda event: setattr(self, "clock_dialog", None)
+                    if event.widget is window and self.clock_dialog is window else None, add="+")
+        update_clock_labels()
+        window.grab_set()
+        entry.focus_set()
 
     def show_help(self):
         messagebox.showinfo(
@@ -1273,7 +1538,7 @@ class AlarmApp(tk.Tk):
         window.focus_set()
 
     def create_test_alarm(self, _event=None):
-        now = datetime.now().replace(microsecond=0)
+        now = self.clock.now().replace(microsecond=0)
         start_at = now + timedelta(seconds=20)
         end_at = start_at + timedelta(seconds=30)
         sound_path = next(
@@ -1326,7 +1591,7 @@ class AlarmApp(tk.Tk):
 
     def stop_sound(self):
         if self.player:
-            now = datetime.now()
+            now = self.clock.now()
             for alarm in self.player.current_alarms.values():
                 self.silenced_occurrences.add(self.occurrence_key(alarm, now))
             self.player.stop()
@@ -1356,7 +1621,7 @@ class AlarmApp(tk.Tk):
     def scheduler_tick(self):
         if not self.running:
             return
-        now = datetime.now()
+        now = self.clock.now()
         self.update_tray_status(now)
         day = DAYS[now.weekday()]
         current = now.time().replace(microsecond=0)
