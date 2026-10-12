@@ -347,6 +347,20 @@ def format_duration(seconds: float | None) -> str:
     return f"{minutes:02d}:{seconds:02d}"
 
 
+def format_clock_offset(offset_seconds: float) -> str:
+    """Human-readable signed offset between system time and app clock."""
+    total = int(round(offset_seconds))
+    if total == 0:
+        return "Sin desfase (hora del sistema)"
+    sign = "+" if total > 0 else "−"
+    total = abs(total)
+    hours, remainder = divmod(total, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"Desfase: {sign}{hours}:{minutes:02d}:{seconds:02d}"
+    return f"Desfase: {sign}{minutes:02d}:{seconds:02d}"
+
+
 def sound_duration(path: Path) -> float | None:
     if MP3 is None:
         return None
@@ -659,7 +673,7 @@ class TooltipManager:
             width, height = label.winfo_reqwidth(), label.winfo_reqheight()
             owner_x, owner_y = owner.winfo_rootx(), owner.winfo_rooty()
             owner_width, owner_height = owner.winfo_width(), owner.winfo_height()
-            edge_margin = 10
+            edge_margin = 15
 
             max_x = max(edge_margin, owner_width - width - edge_margin)
             max_y = max(edge_margin, owner_height - height - edge_margin)
@@ -754,6 +768,7 @@ class AlarmApp(tk.Tk):
         self.sound_var = tk.StringVar()
         self.volume_var = tk.IntVar(value=100)
         self.status_var = tk.StringVar(value="Listo")
+        self.clock_offset_var = tk.StringVar(value=format_clock_offset(0.0))
         self.sound_library_window: tk.Toplevel | None = None
         self.tooltips = TooltipManager(self, self.can_show_tooltip)
         self.tooltips.bind_owner(self)
@@ -900,6 +915,7 @@ class AlarmApp(tk.Tk):
         if not succeeded:
             if not self.clock_manually_set:
                 self.clock.offset_seconds = 0.0
+            self.update_clock_offset_display()
             fallback_message = (
                 "Se mantendrá la hora ajustada manualmente."
                 if self.clock_manually_set
@@ -938,6 +954,7 @@ class AlarmApp(tk.Tk):
         if abs(difference) >= CLOCK_SKEW_THRESHOLD_SECONDS and use_network_time:
             self.clock.set_from_network(network_now, system_now)
         self.update_tray_status(self.clock.now())
+        self.update_clock_offset_display()
         self.status_var.set("Hora real de red aplicada" if self.clock.offset_seconds else "Hora del sistema aplicada")
 
     def open_clock_settings(self):
@@ -987,6 +1004,7 @@ class AlarmApp(tk.Tk):
                 return
             self.clock_manually_set = True
             self.update_tray_status(self.clock.now())
+            self.update_clock_offset_display()
             self.status_var.set("Hora ajustada manualmente")
             close_dialog()
 
@@ -1169,8 +1187,11 @@ class AlarmApp(tk.Tk):
             form_buttons, text="Cancelar", command=self.cancel_configuration, state="disabled"
         )
         self.cancel_button.pack(side="left", padx=(6, 0))
-        ttk.Label(form, textvariable=self.status_var, foreground="#075").grid(
+        ttk.Label(form, textvariable=self.clock_offset_var, foreground="#555").grid(
             row=9, column=0, columnspan=2, sticky="w", pady=(12, 0)
+        )
+        ttk.Label(form, textvariable=self.status_var, foreground="#075").grid(
+            row=10, column=0, columnspan=2, sticky="w", pady=(4, 0)
         )
 
     def normalize_time_field(self, variable: tk.StringVar, *, ceil: bool, field_name: str, field_widget):
@@ -1652,11 +1673,15 @@ class AlarmApp(tk.Tk):
             self.attributes("-topmost", True)
             self.after(200, lambda: self.attributes("-topmost", False))
 
+    def update_clock_offset_display(self):
+        self.clock_offset_var.set(format_clock_offset(self.clock.offset_seconds))
+
     def scheduler_tick(self):
         if not self.running:
             return
         now = self.clock.now()
         self.update_tray_status(now)
+        self.update_clock_offset_display()
         day = DAYS[now.weekday()]
         current = now.time().replace(microsecond=0)
         active_alarms: list[Alarm] = []
@@ -1684,6 +1709,14 @@ class AlarmApp(tk.Tk):
         if self.tray_icon is None:
             self.quit_application()
             return
+        messagebox.showinfo(
+            "La aplicación sigue en ejecución",
+            "La ventana se ha ocultado, pero el programador de alarmas "
+            "sigue funcionando en segundo plano.\n\n"
+            "Para salir por completo, haz clic en el icono de la barra "
+            "de menú o de tareas y elige «Salir».",
+            parent=self,
+        )
         self.window_hidden = True
         self.hide_all_tooltips()
         self.withdraw()
