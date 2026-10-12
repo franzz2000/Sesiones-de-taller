@@ -585,7 +585,9 @@ class AudioPlayer:
 
 
 class TooltipManager:
-    """Own one popup, without entering Tk's event loop during its creation."""
+    """Own a delayed popup, without entering Tk's event loop during creation."""
+
+    DELAY_MS = 1000
 
     def __init__(self, root, can_show):
         self.root = root
@@ -594,6 +596,8 @@ class TooltipManager:
         self.owner = None
         self.key = None
         self._check_id = None
+        self._show_id = None
+        self.pending = None
 
     def bind_owner(self, owner):
         def owner_unavailable(event):
@@ -610,9 +614,25 @@ class TooltipManager:
             return
         if self.window is not None and self.owner is owner and self.key == key:
             return
+        if self.pending is not None:
+            pending_owner, pending_key, _, _, _ = self.pending
+            if pending_owner is owner and pending_key == key:
+                self.pending = (owner, key, text, x, y)
+                return
         self.hide()
-        # A synchronous Destroy callback may already have shown a newer popup.
-        if self.window is not None or not self.can_show(owner):
+        # A synchronous Destroy callback may already have scheduled a newer popup.
+        if self.window is not None or self.pending is not None or not self.can_show(owner):
+            return
+        self.pending = (owner, key, text, x, y)
+        self._show_id = self.root.after(self.DELAY_MS, self._show_pending)
+
+    def _show_pending(self):
+        self._show_id = None
+        pending, self.pending = self.pending, None
+        if pending is None:
+            return
+        owner, key, text, x, y = pending
+        if not text or not self.can_show(owner):
             return
         tooltip = tk.Toplevel(owner)
         # Publish ownership BEFORE any operation that might dispatch Tk events.
@@ -627,9 +647,12 @@ class TooltipManager:
             tooltip.bind("<Destroy>", destroyed, add="+")
             tooltip.wm_overrideredirect(True)
             tooltip.transient(owner)
+            tooltip.configure(background="#000000")
             label = tk.Label(
                 tooltip, text=text, justify="left", background="#fff8c6",
-                foreground="#000000", relief="solid", borderwidth=1,
+                foreground="#000000", relief="flat", borderwidth=0,
+                highlightthickness=1, highlightbackground="#000000",
+                highlightcolor="#000000",
                 padx=10, pady=3, wraplength=max(200, owner.winfo_screenwidth() - 40),
             )
             label.pack()
@@ -663,12 +686,18 @@ class TooltipManager:
     def _forget(self):
         self.window = self.owner = self.key = None
         check_id, self._check_id = self._check_id, None
+        show_id, self._show_id = self._show_id, None
+        self.pending = None
         if check_id is not None:
             self.root.after_cancel(check_id)
+        if show_id is not None:
+            self.root.after_cancel(show_id)
 
     def hide(self, owner=None):
-        if owner is not None and self.owner is not owner:
-            return
+        if owner is not None:
+            pending_owner = self.pending[0] if self.pending is not None else None
+            if self.owner is not owner and pending_owner is not owner:
+                return
         tooltip = self.window
         # Destroy/Unmap callbacks must see an empty state, never a stale cell.
         self._forget()

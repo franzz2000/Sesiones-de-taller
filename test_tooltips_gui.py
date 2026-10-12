@@ -39,6 +39,8 @@ class TooltipGuiTests(unittest.TestCase):
             self.addCleanup(patcher.stop)
         self.root = app.AlarmApp()
         self.root.tray_icon = Mock()  # Exercise close-to-tray, not exit.
+        # Integration tests exercise lifecycle, while unit tests verify the 1 s delay.
+        self.root.tooltips.DELAY_MS = 0
         self.errors = []
         self.root.report_callback_exception = lambda *args: self.errors.append(args)
         self.addCleanup(self.root.quit_application)

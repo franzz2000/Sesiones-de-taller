@@ -14,6 +14,7 @@ class FakePopup:
         self.withdraw = Mock()
         self.wm_overrideredirect = Mock()
         self.transient = Mock()
+        self.configure = Mock()
         self.geometry = Mock()
         self.deiconify = Mock()
 
@@ -37,7 +38,20 @@ class FakePopup:
 class TooltipManagerTests(unittest.TestCase):
     def setUp(self):
         self.root = Mock()
-        self.root.after.return_value = "timer"
+        self.timers = {}
+        self.timer_counter = 0
+
+        def schedule(delay, callback):
+            self.timer_counter += 1
+            timer_id = f"timer-{self.timer_counter}"
+            self.timers[timer_id] = (delay, callback)
+            return timer_id
+
+        def cancel(timer_id):
+            self.timers.pop(timer_id, None)
+
+        self.root.after.side_effect = schedule
+        self.root.after_cancel.side_effect = cancel
         self.owner = Mock()
         self.owner.winfo_screenwidth.return_value = 1200
         self.owner.winfo_screenheight.return_value = 800
@@ -52,29 +66,61 @@ class TooltipManagerTests(unittest.TestCase):
 
         self.addCleanup(patch.stopall)
         patch("app.tk.Toplevel", side_effect=factory).start()
-        self.label = patch("app.tk.Label").start().return_value
+        self.label_factory = patch("app.tk.Label").start()
+        self.label = self.label_factory.return_value
         self.label.winfo_reqwidth.return_value = 250
         self.label.winfo_reqheight.return_value = 30
 
     def show(self, key="file"):
         self.manager.show(self.owner, key, "sonido.mp3", 100, 200)
 
+    def show_after_delay(self):
+        timer_id = self.manager._show_id
+        self.assertIsNotNone(timer_id)
+        delay, callback = self.timers.pop(timer_id)
+        self.assertEqual(delay, 1000)
+        callback()
+
+    def test_tooltip_waits_one_second_and_hide_cancels_pending_show(self):
+        self.show()
+        self.assertEqual(self.popups, [])
+        timer_id = self.manager._show_id
+        self.assertEqual(self.timers[timer_id][0], 1000)
+
+        self.manager.hide(self.owner)
+
+        self.assertIsNone(self.manager._show_id)
+        self.assertNotIn(timer_id, self.timers)
+        self.assertEqual(self.popups, [])
+
     def test_one_popup_for_repeated_and_alternating_cells(self):
         self.show()
+        self.show_after_delay()
         first = self.manager.window
         self.show()
         self.assertIs(self.manager.window, first)
         for key in ("name", "file", "name", "file"):
             self.show(key)
+            self.show_after_delay()
             self.assertEqual(sum(not p.destroyed for p in self.popups), 1)
         self.manager.hide()
         self.assertTrue(all(p.destroyed for p in self.popups))
 
     def test_does_not_dispatch_nested_idle_events(self):
         self.show()
+        self.show_after_delay()
         self.label.update_idletasks.assert_not_called()
         self.label.update.assert_not_called()
         self.manager.window.geometry.assert_called_once_with("250x30+112+212")
+
+    def test_tooltip_border_uses_explicit_square_outline(self):
+        self.show()
+        self.show_after_delay()
+        options = self.label_factory.call_args.kwargs
+
+        self.assertEqual(options["relief"], "flat")
+        self.assertEqual(options["highlightthickness"], 1)
+        self.assertEqual(options["highlightbackground"], "#000000")
 
     def test_ownership_published_before_window_is_shown(self):
         def check_pack():
@@ -83,9 +129,11 @@ class TooltipManagerTests(unittest.TestCase):
             self.assertEqual(self.manager.key, "file")
         self.label.pack.side_effect = check_pack
         self.show()
+        self.show_after_delay()
 
     def test_destroy_callback_sees_cleared_references(self):
         self.show()
+        self.show_after_delay()
         popup = self.manager.window
         def check_destroy(event):
             self.assertIsNone(self.manager.window)
@@ -95,13 +143,15 @@ class TooltipManagerTests(unittest.TestCase):
         popup.bindings["<Destroy>"] = check_destroy
         self.manager.hide()
         self.assertTrue(popup.destroyed)
-        self.root.after_cancel.assert_called_with("timer")
+        self.root.after_cancel.assert_called_with("timer-2")
 
     def test_cleanup_allows_same_cell_to_show_again(self):
         self.show()
+        self.show_after_delay()
         first = self.manager.window
         self.manager.hide()
         self.show()
+        self.show_after_delay()
         self.assertTrue(first.destroyed)
         self.assertIsNot(self.manager.window, first)
 
@@ -109,6 +159,7 @@ class TooltipManagerTests(unittest.TestCase):
         self.manager.bind_owner(self.owner)
         bindings = {c.args[0]: c.args[1] for c in self.owner.bind.call_args_list}
         self.show()
+        self.show_after_delay()
         bindings["<Unmap>"](SimpleNamespace(widget=Mock()))
         self.assertIsNotNone(self.manager.window)
         bindings["<Unmap>"](SimpleNamespace(widget=self.owner))
@@ -120,6 +171,7 @@ class TooltipManagerTests(unittest.TestCase):
         for event in ("<FocusOut>", "<Destroy>"):
             with self.subTest(event=event):
                 self.show()
+                self.show_after_delay()
                 bindings[event](SimpleNamespace(widget=self.owner))
                 self.assertIsNone(self.manager.window)
 
@@ -128,25 +180,29 @@ class TooltipManagerTests(unittest.TestCase):
         self.allowed = False
         self.show("name")
         self.assertIsNone(self.manager.window)
-        self.assertEqual(len(self.popups), 1)
+        self.assertEqual(len(self.popups), 0)
 
     def test_watchdog_handles_missed_visibility_event(self):
         self.show()
+        self.show_after_delay()
         self.allowed = False
         self.manager._check_owner()
         self.assertIsNone(self.manager.window)
 
     def test_destroyed_popup_clears_cell_and_timer(self):
         self.show()
+        self.show_after_delay()
         self.manager.window.destroy()
         self.assertIsNone(self.manager.key)
-        self.root.after_cancel.assert_called_with("timer")
+        self.root.after_cancel.assert_called_with("timer-2")
         self.show()
+        self.show_after_delay()
         self.assertEqual(len(self.popups), 2)
 
     def test_hidden_during_construction_never_maps_popup(self):
         self.label.pack.side_effect = lambda: setattr(self, "allowed", False)
         self.show()
+        self.show_after_delay()
         self.assertTrue(self.popups[0].destroyed)
         self.popups[0].deiconify.assert_not_called()
 
